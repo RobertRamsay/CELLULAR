@@ -1,5 +1,7 @@
 /// obj_purpose - Step
 
+refresh_counts();
+
 if (global.cellular_paused) {
     exit;
 }

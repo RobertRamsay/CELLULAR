@@ -67,7 +67,7 @@ with (obj_cell) {
         _max_gen = generation;
     }
     if (follower_tally > 0) {
-        array_push(_leaders, { name : entity_name, rank : rank, followers : follower_tally, done : completions });
+        array_push(_leaders, { name : entity_name, rank : rank, followers : follower_tally, done : completions, spd : move_speed, sense : senses });
     }
 }
 array_sort(_leaders, function(_a, _b) {
@@ -150,7 +150,7 @@ if (_shown == 0) {
 }
 for (var i = 0; i < _shown; i++) {
     var _l = _leaders[i];
-    draw_text(_x, _y, _l.name + "  " + rank_names[_l.rank] + "  followers " + string(_l.followers) + "  done " + string(_l.done));
+    draw_text(_x, _y, _l.name + "  " + rank_names[_l.rank] + "  followers " + string(_l.followers) + "  done " + string(_l.done) + "  spd " + string(_l.spd) + "  sense " + string(_l.sense));
     _y += _row;
 }
 _y += _row;
@@ -163,16 +163,24 @@ if (instance_number(obj_purpose) == 0) {
     draw_text(_x, _y, "none right now");
     _y += _row;
 }
-var _px0 = _x;
-var _py0 = _y;
-var _row0 = _row;
+var _px0    = _x;
+var _py0    = _y;
+var _row0   = _row;
+var _listed = 0;
+var _max_listed = 10;
 with (obj_purpose) {
-    var _state = "unfound";
-    if (discovered) {
-        _state = string(helpers_present()) + " here, " + string(assigned_count()) + "/" + string(want_helpers) + " signed up";
+    if (_listed < _max_listed) {
+        var _state = "unfound";
+        if (discovered) {
+            _state = string(helpers_present()) + " here, " + string(assigned_count()) + "/" + string(want_helpers) + " signed up";
+        }
+        draw_text(_px0, _py0, label + "  " + string(floor(min(1, work_done / work_needed) * 100)) + "%  needs " + string(min_helpers) + "  " + _state);
+        _py0 += _row0;
     }
-    draw_text(_px0, _py0, label + "  " + string(floor(min(1, work_done / work_needed) * 100)) + "%  needs " + string(min_helpers) + "  " + _state);
-    _py0 += _row0;
+    _listed += 1;
+}
+if (_listed > _max_listed) {
+    draw_text(_px0, _py0, "+ " + string(_listed - _max_listed) + " more");
 }
 
 // Controls at the bottom of the left panel

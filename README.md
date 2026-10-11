@@ -24,7 +24,7 @@ A GameMaker project. A living pixel inside a 256 x 256 x 256 voxel room.
 - After 60 seconds a lantern settles into a permanent static pixel.
 
 ## Purposes
-- Every 20 to 40 seconds a **purpose** drops onto the terrain somewhere in the cube (or press O to drop one under the mouse). Up to 3 at once.
+- Every 10 to 20 seconds a **purpose** drops onto the terrain in a **sparse area**: 24 spots are sampled and the one with the fewest cells around it (and furthest from other purposes) wins. Press O to drop more under the mouse. Up to 32 at once.
 - Kinds take different amounts of work and need different numbers of helpers present before any work counts:
 
 | Purpose | Work | Helpers needed | Helpers wanted |
@@ -66,9 +66,10 @@ A GameMaker project. A living pixel inside a 256 x 256 x 256 voxel room.
 | Captain | 6 | 3 |
 | Elder | 10 | 6 |
 
-- From Veteran up, an idle cell with room in its force goes looking for a **lonely** cell: one with no leader and no purpose, of lower rank, that is purposeless or has nobody within 10 voxels.
+- From Veteran up, an idle cell with room in its force goes looking for a **lonely** cell: one with no leader and no purpose, of lower rank, that is purposeless or has no other cell in its 16-voxel block.
 - When it reaches it, the lonely cell joins its force and becomes **loyal**. Loyal followers stay near their leader, never answer anyone else's call, and take up whatever purpose their leader takes up.
 - Loyal is its own mood (multiplier 1.0). If a leader is lost, its followers are free again.
+- Each rank-up adds **+1 speed** (one more action per tick) and **+2 senses** (how far it notices purposes, how far a herald's call carries, and how far it will go to find someone lonely).
 - Rank shows as small pips above a cell; a faint line links each follower to its leader.
 
 ## Screen
@@ -77,7 +78,7 @@ A GameMaker project. A living pixel inside a 256 x 256 x 256 voxel room.
 - Right panel: recent messages, newest first, with the name of the entity behind each one.
 
 ## Limits
-64 cells, 24 lanterns, one action per cell per tick. P pauses everything instantly; K wipes all life.
+1024 cells, 24 lanterns, 32 purposes. Each cell gets as many actions per tick as its speed. Crowding and loneliness use live per-block cell counts (16 x 16 x 16 blocks), so they stay cheap at 1024 cells. Mood expressions share a global speech budget (about four a second) so the screen and message log stay readable. Clone choices and lantern refusals are not logged. P pauses everything instantly; K wipes all life.
 
 ## Controls
 | Key | Action |

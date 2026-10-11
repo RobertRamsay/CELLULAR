@@ -58,23 +58,23 @@ for (var i = 0; i < 3; i++) {
 }
 
 limits = {
-    max_cells            : 64,
+    max_cells            : 1024,
     max_lanterns         : 24,
     decision_steps       : game_get_speed(gamespeed_fps) * 10,
     tick_steps           : 6,
-    max_actions_per_tick : 1,
+    base_speed           : 1,
     clone_cost           : 0.6,
     move_cost            : 0.004,
     dig_cost             : 0.01,
     place_cost           : 0.01,
     energy_regen         : 0.002,
-    crowd_radius         : 12,
     lantern_life         : game_get_speed(gamespeed_fps) * 60,
 
     // Purposes
-    max_purposes         : 3,
-    purpose_interval_min : game_get_speed(gamespeed_fps) * 20,
-    purpose_interval_max : game_get_speed(gamespeed_fps) * 40,
+    max_purposes         : 32,
+    purpose_interval_min : game_get_speed(gamespeed_fps) * 10,
+    purpose_interval_max : game_get_speed(gamespeed_fps) * 20,
+    purpose_samples      : 24,
     perception_radius    : 20,
     hearing_radius       : 28,
     relay_radius         : 8,
@@ -100,7 +100,11 @@ limits = {
     seek_ticks           : 150,
     bond_radius          : 2,
     follow_distance      : 4,
-    lonely_radius        : 10,
+    rank_speed_bonus     : 1,
+    rank_sense_bonus     : 2,
+
+    // Speech: mood expressions share a global budget so 1024 cells don't drown the screen.
+    speech_gap_steps     : 15,
 
     allowed              : ["move", "dig", "place", "clone", "become_lantern", "work"]
 };
@@ -133,6 +137,13 @@ mood_lines = {
 purpose_timer      = 0;
 completed_purposes = 0;
 static_count       = 0;
+speech_cooldown    = 0;
+
+// Cell density: the cube is split into 16 x 16 x 16 blocks of 16^3 voxels.
+// set_voxel keeps a live count of cells per block, so crowding and loneliness are O(1).
+bucket_size  = 16;
+bucket_dim   = world_size div bucket_size;
+cell_buckets = array_create(bucket_dim * bucket_dim * bucket_dim, 0);
 
 // Ranks earned by completing purposes. From leader_rank up, a cell seeks lonely cells to join its force.
 rank_names      = ["Novice", "Helper", "Veteran", "Captain", "Elder"];
@@ -238,6 +249,36 @@ refresh_side = function(_y, _z) {
     write_view_pixel(2, _y, world_size - 1 - _z, _shade);
 };
 
+bucket_index = function(_x, _y, _z) {
+    return (_x div bucket_size) + ((_y div bucket_size) * bucket_dim) + ((_z div bucket_size) * bucket_dim * bucket_dim);
+};
+
+// Cells in the same 16^3 block as this voxel (including any cell standing on it).
+bucket_count = function(_x, _y, _z) {
+    return cell_buckets[bucket_index(_x, _y, _z)];
+};
+
+// Cells in this block and the 26 blocks around it.
+neighbour_count = function(_x, _y, _z) {
+    var _bx    = _x div bucket_size;
+    var _by    = _y div bucket_size;
+    var _bz    = _z div bucket_size;
+    var _total = 0;
+    for (var _dz = -1; _dz <= 1; _dz++) {
+        for (var _dy = -1; _dy <= 1; _dy++) {
+            for (var _dx = -1; _dx <= 1; _dx++) {
+                var _nx = _bx + _dx;
+                var _ny = _by + _dy;
+                var _nz = _bz + _dz;
+                if (_nx >= 0 && _ny >= 0 && _nz >= 0 && _nx < bucket_dim && _ny < bucket_dim && _nz < bucket_dim) {
+                    _total += cell_buckets[_nx + (_ny * bucket_dim) + (_nz * bucket_dim * bucket_dim)];
+                }
+            }
+        }
+    }
+    return _total;
+};
+
 set_voxel = function(_x, _y, _z, _value) {
     if (!in_bounds(_x, _y, _z)) {
         return false;
@@ -253,6 +294,12 @@ set_voxel = function(_x, _y, _z, _value) {
         static_count += 1;
     } else if (_old == voxel_static) {
         static_count -= 1;
+    }
+
+    if (_value == voxel_cell) {
+        cell_buckets[bucket_index(_x, _y, _z)] += 1;
+    } else if (_old == voxel_cell) {
+        cell_buckets[bucket_index(_x, _y, _z)] -= 1;
     }
 
     if (_value == voxel_static) {
@@ -333,6 +380,7 @@ clear_world_data = function() {
     ds_grid_clear(front_cache, world_size);
     ds_grid_clear(side_cache, world_size);
     static_count = 0;
+    cell_buckets = array_create(bucket_dim * bucket_dim * bucket_dim, 0);
 };
 
 clear_world = function() {
@@ -460,19 +508,40 @@ spawn_purpose = function(_x, _y, _z, _kind_index) {
     return _purpose;
 };
 
-// Drop a purpose on the terrain surface somewhere in the cube.
+// Drop a purpose on the terrain surface in a sparse area: sample spots and pick the one
+// with the fewest cells around it, keeping away from other purposes.
 drop_random_purpose = function() {
-    repeat (20) {
+    var _best_x     = -1;
+    var _best_y     = -1;
+    var _best_z     = -1;
+    var _best_score = infinity;
+
+    repeat (limits.purpose_samples) {
         var _x = irandom(world_size - 1);
         var _y = irandom(world_size - 1);
         var _z = top_cache[# _x, _y] + 1;
         if (_z < world_size) {
             if (get_voxel(_x, _y, _z) == voxel_empty) {
-                return spawn_purpose(_x, _y, _z, irandom(array_length(purpose_kinds) - 1));
+                var _score = neighbour_count(_x, _y, _z);
+                with (obj_purpose) {
+                    if (point_distance_3d(px, py, pz, _x, _y, _z) < 48) {
+                        _score += 8;
+                    }
+                }
+                if (_score < _best_score) {
+                    _best_score = _score;
+                    _best_x     = _x;
+                    _best_y     = _y;
+                    _best_z     = _z;
+                }
             }
         }
     }
-    return noone;
+
+    if (_best_x < 0) {
+        return noone;
+    }
+    return spawn_purpose(_best_x, _best_y, _best_z, irandom(array_length(purpose_kinds) - 1));
 };
 
 make_cell_name = function() {
@@ -525,7 +594,7 @@ request_action = function(_cell, _name) {
         return false;
     }
 
-    if (_cell.actions_this_tick >= limits.max_actions_per_tick) {
+    if (_cell.actions_this_tick >= _cell.move_speed) {
         log_action(_cell, _name, "refused", "tick cap");
         return false;
     }

@@ -42,6 +42,10 @@ seek_timer     = 0;
 sought_by      = noone;
 follower_tally = 0;
 
+// Rank-up gains: each rank adds speed (actions per tick) and senses (perception, hearing, seeking reach).
+move_speed     = _world.limits.base_speed;
+senses         = _world.limits.perception_radius;
+
 _world.set_voxel(cx, cy, cz, _world.voxel_cell);
 
 pick_heading = function() {
@@ -211,16 +215,13 @@ try_clone = function() {
                 if (instance_exists(_child)) {
                     carried -= _child_carried;
                     energy  -= _world.limits.clone_cost;
-                    _world.log_action(id, "clone", "done", "generation " + string(generation + 1));
                     return true;
                 }
-                _world.log_action(id, "clone", "failed", "cap reached");
                 return false;
             }
         }
     }
 
-    _world.log_action(id, "clone", "failed", "no space");
     return false;
 };
 
@@ -229,7 +230,6 @@ try_become_lantern = function() {
     var _world = global.cellular_world;
 
     if (instance_number(obj_lantern) >= _world.limits.max_lanterns) {
-        _world.log_action(id, "become_lantern", "refused", "lantern cap - rested");
         return false;
     }
 
@@ -249,7 +249,6 @@ try_become_lantern = function() {
         }
     }
 
-    _world.log_action(id, "become_lantern", "failed", "no space");
     return false;
 };
 
@@ -257,20 +256,8 @@ try_become_lantern = function() {
 make_life_choice = function() {
     var _world  = global.cellular_world;
     var _limits = _world.limits;
-    var _me     = id;
-    var _mx     = cx;
-    var _my     = cy;
-    var _mz     = cz;
-    var _radius = _limits.crowd_radius;
-    var _crowd  = 0;
-
-    with (obj_cell) {
-        if (id != _me) {
-            if (point_distance_3d(cx, cy, cz, _mx, _my, _mz) <= _radius) {
-                _crowd += 1;
-            }
-        }
-    }
+    // Other cells sharing this cell's 16^3 block.
+    var _crowd  = _world.bucket_count(cx, cy, cz) - 1;
 
     var _wants_clone = false;
     if (energy >= _limits.clone_cost) {
@@ -323,6 +310,10 @@ update_mood = function() {
 
 express = function() {
     var _world = global.cellular_world;
+    if (_world.speech_cooldown > 0) {
+        return false;
+    }
+    _world.speech_cooldown = _world.limits.speech_gap_steps;
     var _lines = _world.mood_lines[$ mood];
     var _line  = _lines[irandom(array_length(_lines) - 1)];
     if (mood == "loyal") {
@@ -375,7 +366,7 @@ step_toward = function(_tx, _ty, _tz) {
 look_for_purpose = function() {
     var _limits    = global.cellular_world.limits;
     var _best      = noone;
-    var _best_dist = _limits.perception_radius + 1;
+    var _best_dist = senses + 1;
     var _x         = cx;
     var _y         = cy;
     var _z         = cz;
@@ -413,6 +404,7 @@ look_for_purpose = function() {
         say("what's that?");
     } else {
         role = "worker";
+        _best.assigned_cache += 1;
         say("I'll help!");
     }
     return true;
@@ -440,6 +432,7 @@ recruit_nearby = function(_radius) {
                     wait_timer     = 0;
                     say("coming!");
                     _recruited += 1;
+                    _p.assigned_cache += 1;
                 }
             }
         }
@@ -506,7 +499,7 @@ purpose_turn = function() {
 
     if (role == "herald") {
         rally_timer -= 1;
-        recruit_nearby(_limits.hearing_radius);
+        recruit_nearby(_limits.hearing_radius + sense_bonus());
         var _centre = swarm_centre();
         if (!_centre.ok || rally_timer <= 0 || _p.assigned_count() >= _p.want_helpers) {
             role       = "worker";
@@ -554,20 +547,13 @@ count_followers = function() {
     return _count;
 };
 
-is_alone = function(_radius) {
-    var _me = id;
-    var _x  = cx;
-    var _y  = cy;
-    var _z  = cz;
-    var _n  = 0;
-    with (obj_cell) {
-        if (id != _me) {
-            if (point_distance_3d(cx, cy, cz, _x, _y, _z) <= _radius) {
-                _n += 1;
-            }
-        }
-    }
-    return (_n == 0);
+// Alone means no other cell shares this cell's 16^3 block.
+is_alone = function() {
+    return (global.cellular_world.bucket_count(cx, cy, cz) <= 1);
+};
+
+sense_bonus = function() {
+    return senses - global.cellular_world.limits.perception_radius;
 };
 
 release_seek = function() {
@@ -591,9 +577,8 @@ find_lonely = function() {
     var _x         = cx;
     var _y         = cy;
     var _z         = cz;
-    var _lonely_r  = _limits.lonely_radius;
     var _best      = noone;
-    var _best_dist = _limits.seek_radius + 1;
+    var _best_dist = _limits.seek_radius + sense_bonus() + 1;
 
     with (obj_cell) {
         if (id != _me && rank < _my_rank && purpose_target == noone) {
@@ -601,7 +586,7 @@ find_lonely = function() {
                 var _d = point_distance_3d(cx, cy, cz, _x, _y, _z);
                 if (_d < _best_dist) {
                     if (count_followers() == 0) {
-                        if (mood == "purposeless" || is_alone(_lonely_r)) {
+                        if (mood == "purposeless" || is_alone()) {
                             _best      = id;
                             _best_dist = _d;
                         }
@@ -620,10 +605,10 @@ consider_seeking = function() {
     if (rank < _limits.leader_rank) {
         return;
     }
-    if (count_followers() >= _world.rank_followers[rank]) {
+    if (random(1) >= _limits.seek_chance) {
         return;
     }
-    if (random(1) >= _limits.seek_chance) {
+    if (count_followers() >= _world.rank_followers[rank]) {
         return;
     }
     var _target = find_lonely();

@@ -26,6 +26,9 @@ if (keyboard_check_pressed(ord("C"))) {
 
 // Purposes drop in every so often.
 if (!global.cellular_paused) {
+    if (speech_cooldown > 0) {
+        speech_cooldown -= 1;
+    }
     purpose_timer -= 1;
     if (purpose_timer <= 0) {
         drop_random_purpose();

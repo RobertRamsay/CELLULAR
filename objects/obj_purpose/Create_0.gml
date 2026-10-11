@@ -21,38 +21,43 @@ scout        = noone;
 contributors = [];
 completed    = false;
 
+// Refreshed once per step in the Step event so 1024 cells don't each loop over the swarm.
+assigned_cache = 0;
+present_cache  = 0;
+
 _world.set_voxel(px, py, pz, _world.voxel_purpose);
 
-// Cells currently signed up to this purpose, wherever they are.
-assigned_count = function() {
-    var _me    = id;
-    var _count = 0;
+// Recount signed-up cells and those close enough to work.
+refresh_counts = function() {
+    var _me       = id;
+    var _x        = px;
+    var _y        = py;
+    var _z        = pz;
+    var _radius   = global.cellular_world.limits.work_radius + 1;
+    var _assigned = 0;
+    var _present  = 0;
     with (obj_cell) {
         if (purpose_target == _me) {
             if (role != "idle") {
-                _count += 1;
+                _assigned += 1;
+            }
+            if (point_distance_3d(cx, cy, cz, _x, _y, _z) <= _radius) {
+                _present += 1;
             }
         }
     }
-    return _count;
+    assigned_cache = _assigned;
+    present_cache  = _present;
+};
+
+// Cells currently signed up to this purpose, wherever they are.
+assigned_count = function() {
+    return assigned_cache;
 };
 
 // Signed-up cells close enough to work.
 helpers_present = function() {
-    var _me     = id;
-    var _x      = px;
-    var _y      = py;
-    var _z      = pz;
-    var _radius = global.cellular_world.limits.work_radius + 1;
-    var _count  = 0;
-    with (obj_cell) {
-        if (purpose_target == _me) {
-            if (point_distance_3d(cx, cy, cz, _x, _y, _z) <= _radius) {
-                _count += 1;
-            }
-        }
-    }
-    return _count;
+    return present_cache;
 };
 
 apply_work = function(_cell, _amount) {
@@ -85,8 +90,10 @@ complete = function() {
                 completions += 1;
                 var _new_rank = _world.rank_for(completions);
                 if (_new_rank > rank) {
-                    rank = _new_rank;
-                    say("ranked up: " + _world.rank_names[rank] + "!");
+                    rank        = _new_rank;
+                    move_speed += _world.limits.rank_speed_bonus;
+                    senses     += _world.limits.rank_sense_bonus;
+                    say("ranked up: " + _world.rank_names[rank] + "! speed " + string(move_speed));
                     _world.log_action(id, "rank", "up", _world.rank_names[rank]);
                 } else {
                     say("we did it!");

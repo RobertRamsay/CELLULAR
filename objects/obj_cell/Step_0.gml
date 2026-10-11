@@ -15,23 +15,26 @@ if (tick_timer >= _limits.tick_steps) {
     actions_this_tick = 0;
     update_mood();
 
-    // Loyal followers never freelance; everyone else notices purposes nearby.
-    if (purpose_target == noone && !instance_exists(leader)) {
-        look_for_purpose();
-    }
+    // move_speed turns per tick; the gatekeeper allows move_speed actions per tick.
+    repeat (move_speed) {
+        // Loyal followers never freelance; everyone else notices purposes nearby.
+        if (purpose_target == noone && !instance_exists(leader)) {
+            look_for_purpose();
+        }
 
-    if (purpose_target != noone) {
-        purpose_turn();
-    } else if (instance_exists(leader)) {
-        follow_turn();
-    } else if (role == "seeking") {
-        seek_turn();
-    } else {
-        consider_seeking();
-        if (role == "seeking") {
+        if (purpose_target != noone) {
+            purpose_turn();
+        } else if (instance_exists(leader)) {
+            follow_turn();
+        } else if (role == "seeking") {
             seek_turn();
         } else {
-            take_turn();
+            consider_seeking();
+            if (role == "seeking") {
+                seek_turn();
+            } else {
+                take_turn();
+            }
         }
     }
 }
