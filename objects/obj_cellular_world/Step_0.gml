@@ -24,6 +24,15 @@ if (keyboard_check_pressed(ord("C"))) {
     clear_world();
 }
 
+// Purposes drop in every so often.
+if (!global.cellular_paused) {
+    purpose_timer -= 1;
+    if (purpose_timer <= 0) {
+        drop_random_purpose();
+        purpose_timer = next_purpose_interval();
+    }
+}
+
 if (mouse_wheel_up()) {
     brush_radius = min(brush_max, brush_radius + 1);
 }
@@ -41,6 +50,16 @@ if (_px >= 0 && _py >= 0 && _px < world_size && _py < world_size) {
             var _cell = spawn_cell(_slot.vx, _slot.vy, _slot.vz, make_default_genome(), 1.0, 0, 0);
             if (!instance_exists(_cell)) {
                 log_action("world", "seed", "refused", "cell cap or occupied");
+            }
+        }
+    }
+
+    if (keyboard_check_pressed(ord("O"))) {
+        var _drop = surface_slot(view_mode, _px, _py);
+        if (_drop.ok) {
+            var _purpose = spawn_purpose(_drop.vx, _drop.vy, _drop.vz, irandom(array_length(purpose_kinds) - 1));
+            if (!instance_exists(_purpose)) {
+                log_action("world", "purpose", "refused", "purpose cap or occupied");
             }
         }
     }

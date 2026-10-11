@@ -18,6 +18,7 @@ voxel_empty   = 0;
 voxel_static  = 1;
 voxel_cell    = 2;
 voxel_lantern = 3;
+voxel_purpose = 4;
 
 // 16 MB voxel store. Index = z + (x * 256) + (y * 65536) so every Z column is contiguous.
 voxels = buffer_create(world_volume, buffer_fixed, 1);
@@ -58,15 +59,65 @@ limits = {
     energy_regen         : 0.002,
     crowd_radius         : 12,
     lantern_life         : game_get_speed(gamespeed_fps) * 60,
-    allowed              : ["move", "dig", "place", "clone", "become_lantern"]
+
+    // Purposes
+    max_purposes         : 3,
+    purpose_interval_min : game_get_speed(gamespeed_fps) * 20,
+    purpose_interval_max : game_get_speed(gamespeed_fps) * 40,
+    perception_radius    : 20,
+    hearing_radius       : 28,
+    relay_radius         : 8,
+    work_radius          : 2,
+    work_rate            : 1,
+    rally_ticks          : 60,
+    wait_ticks           : 40,
+    reward_energy        : 0.5,
+    reward_pride         : 0.25,
+
+    // Mood
+    usage_rate           : 0.0017,
+    proud_threshold      : 0.6,
+    purposeless_threshold: 0.15,
+    express_min_steps    : game_get_speed(gamespeed_fps) * 8,
+    express_max_steps    : game_get_speed(gamespeed_fps) * 20,
+    bubble_steps         : game_get_speed(gamespeed_fps) * 3,
+
+    allowed              : ["move", "dig", "place", "clone", "become_lantern", "work"]
 };
+
+// Purposes take different amounts of work and need different numbers of helpers present.
+purpose_kinds = [
+    { name : "Spark",    work : 150,  min_helpers : 1, want_helpers : 2  },
+    { name : "Knot",     work : 600,  min_helpers : 2, want_helpers : 4  },
+    { name : "Riddle",   work : 1800, min_helpers : 4, want_helpers : 6  },
+    { name : "Monolith", work : 4800, min_helpers : 6, want_helpers : 10 }
+];
+
+// Problem-solving multiplier per mood: applies to work rate and to getting round obstacles.
+mood_factors = {
+    purposeless : 0.6,
+    content     : 0.9,
+    purposeful  : 1.15,
+    proud       : 1.3
+};
+
+mood_lines = {
+    purposeless : ["purposeless...", "what am I for?", "drifting", "nothing to do"],
+    content     : ["all is fine", "just digging", "hmm"],
+    purposeful  : ["I have a purpose!", "on my way!", "this matters"],
+    proud       : ["proud - I'm needed", "we keep going", "useful again"]
+};
+
+purpose_timer      = 0;
+completed_purposes = 0;
 
 action_counts = {
     move           : 0,
     dig            : 0,
     place          : 0,
     clone          : 0,
-    become_lantern : 0
+    become_lantern : 0,
+    work           : 0
 };
 
 action_log = [];
@@ -236,6 +287,9 @@ wipe_life = function() {
 
 clear_world_data = function() {
     wipe_life();
+    with (obj_purpose) {
+        instance_destroy();
+    }
     buffer_fill(voxels, 0, buffer_u8, voxel_empty, world_volume);
     ds_grid_clear(top_cache, -1);
     ds_grid_clear(front_cache, world_size);
@@ -340,6 +394,44 @@ spawn_lantern = function(_x, _y, _z) {
         spawn_y : _y,
         spawn_z : _z
     });
+};
+
+// ---------------------------------------------------------------- purposes
+
+next_purpose_interval = function() {
+    return irandom_range(limits.purpose_interval_min, limits.purpose_interval_max);
+};
+
+spawn_purpose = function(_x, _y, _z, _kind_index) {
+    if (instance_number(obj_purpose) >= limits.max_purposes) {
+        return noone;
+    }
+    if (get_voxel(_x, _y, _z) != voxel_empty) {
+        return noone;
+    }
+    var _purpose = instance_create_depth(0, 0, 5, obj_purpose, {
+        spawn_x    : _x,
+        spawn_y    : _y,
+        spawn_z    : _z,
+        spawn_kind : _kind_index
+    });
+    log_action("world", "purpose", "dropped", purpose_kinds[_kind_index].name);
+    return _purpose;
+};
+
+// Drop a purpose on the terrain surface somewhere in the cube.
+drop_random_purpose = function() {
+    repeat (20) {
+        var _x = irandom(world_size - 1);
+        var _y = irandom(world_size - 1);
+        var _z = top_cache[# _x, _y] + 1;
+        if (_z < world_size) {
+            if (get_voxel(_x, _y, _z) == voxel_empty) {
+                return spawn_purpose(_x, _y, _z, irandom(array_length(purpose_kinds) - 1));
+            }
+        }
+    }
+    return noone;
 };
 
 log_action = function(_who, _action, _result, _reason) {
@@ -478,28 +570,31 @@ sculpt_at = function(_view, _px, _py, _add) {
 
 // ---------------------------------------------------------------- drawing living pixels
 
-draw_marker = function(_vx, _vy, _vz, _is_lantern, _halo_radius) {
-    var _sx    = 0;
-    var _sy    = 0;
-    var _value = 0;
+// Voxel to screen for the current view. value is the depth used for the grey.
+project = function(_vx, _vy, _vz) {
+    var _p = { sx : 0, sy : 0, value : 0 };
     if (view_mode == 0) {
-        _sx    = _vx;
-        _sy    = _vy;
-        _value = _vz;
+        _p.sx    = _vx;
+        _p.sy    = _vy;
+        _p.value = _vz;
     } else if (view_mode == 1) {
-        _sx    = _vx;
-        _sy    = world_size - 1 - _vz;
-        _value = world_size - 1 - _vy;
+        _p.sx    = _vx;
+        _p.sy    = world_size - 1 - _vz;
+        _p.value = world_size - 1 - _vy;
     } else {
-        _sx    = _vy;
-        _sy    = world_size - 1 - _vz;
-        _value = world_size - 1 - _vx;
+        _p.sx    = _vy;
+        _p.sy    = world_size - 1 - _vz;
+        _p.value = world_size - 1 - _vx;
     }
+    return _p;
+};
 
+draw_marker = function(_vx, _vy, _vz, _is_lantern, _halo_radius) {
+    var _p     = project(_vx, _vy, _vz);
     var _s     = display_scale;
-    var _left  = _sx * _s;
-    var _top   = _sy * _s;
-    var _shade = shade_for(_value);
+    var _left  = _p.sx * _s;
+    var _top   = _p.sy * _s;
+    var _shade = shade_for(_p.value);
 
     if (_is_lantern) {
         draw_set_colour(c_white);
@@ -525,5 +620,65 @@ draw_marker = function(_vx, _vy, _vz, _is_lantern, _halo_radius) {
 
     draw_set_colour(c_white);
 };
+
+// A small speech bubble above a living pixel.
+draw_bubble = function(_vx, _vy, _vz, _text) {
+    var _p  = project(_vx, _vy, _vz);
+    var _s  = display_scale;
+    var _cx = (_p.sx * _s) + (_s * 0.5);
+    var _by = (_p.sy * _s) - 6;
+    var _w  = string_width(_text) + 8;
+    var _h  = string_height(_text) + 4;
+
+    draw_set_alpha(0.8);
+    draw_set_colour(c_black);
+    draw_rectangle(_cx - (_w * 0.5), _by - _h, _cx + (_w * 0.5), _by, false);
+    draw_set_alpha(1);
+    draw_set_colour(c_white);
+    draw_rectangle(_cx - (_w * 0.5), _by - _h, _cx + (_w * 0.5), _by, true);
+    draw_set_halign(fa_center);
+    draw_set_valign(fa_bottom);
+    draw_text(_cx, _by - 2, _text);
+    draw_set_halign(fa_left);
+    draw_set_valign(fa_top);
+};
+
+draw_purpose = function(_vx, _vy, _vz, _label, _progress, _discovered) {
+    var _p     = project(_vx, _vy, _vz);
+    var _s     = display_scale;
+    var _cx    = (_p.sx * _s) + (_s * 0.5);
+    var _cy    = (_p.sy * _s) + (_s * 0.5);
+    var _pulse = 6 + (2 * sin(current_time / 200));
+
+    draw_set_colour(c_white);
+    draw_primitive_begin(pr_linestrip);
+    draw_vertex(_cx, _cy - _pulse);
+    draw_vertex(_cx + _pulse, _cy);
+    draw_vertex(_cx, _cy + _pulse);
+    draw_vertex(_cx - _pulse, _cy);
+    draw_vertex(_cx, _cy - _pulse);
+    draw_primitive_end();
+
+    var _shade = shade_for(_p.value);
+    draw_set_colour(make_colour_rgb(_shade, _shade, _shade));
+    draw_rectangle(_cx - 2, _cy - 2, _cx + 2, _cy + 2, false);
+
+    // Progress bar
+    draw_set_colour(c_dkgray);
+    draw_rectangle(_cx - 12, _cy + 10, _cx + 12, _cy + 12, false);
+    draw_set_colour(c_white);
+    draw_rectangle(_cx - 12, _cy + 10, _cx - 12 + (24 * _progress), _cy + 12, false);
+
+    var _text = "?";
+    if (_discovered) {
+        _text = _label + " " + string(floor(_progress * 100)) + "%";
+    }
+    draw_set_halign(fa_center);
+    draw_set_valign(fa_top);
+    draw_text(_cx, _cy + 14, _text);
+    draw_set_halign(fa_left);
+};
+
+purpose_timer = next_purpose_interval();
 
 generate_terrain();

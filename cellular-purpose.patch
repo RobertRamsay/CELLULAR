@@ -1,0 +1,939 @@
+diff --git a/Cellular.yyp b/Cellular.yyp
+index 222905a..ce4de11 100644
+--- a/Cellular.yyp
++++ b/Cellular.yyp
+@@ -24,6 +24,7 @@
+     {"id":{"name":"obj_cell","path":"objects/obj_cell/obj_cell.yy",},},
+     {"id":{"name":"obj_cellular_world","path":"objects/obj_cellular_world/obj_cellular_world.yy",},},
+     {"id":{"name":"obj_lantern","path":"objects/obj_lantern/obj_lantern.yy",},},
++    {"id":{"name":"obj_purpose","path":"objects/obj_purpose/obj_purpose.yy",},},
+     {"id":{"name":"rm_cellular","path":"rooms/rm_cellular/rm_cellular.yy",},},
+   ],
+   "resourceType":"GMProject",
+diff --git a/README.md b/README.md
+index 1efc730..6512ca2 100644
+--- a/README.md
++++ b/README.md
+@@ -23,6 +23,37 @@ A GameMaker project. A living pixel inside a 256 x 256 x 256 voxel room.
+ - Every half second, floating static pixels within 6 voxels drop one level until supported, and cells within 10 voxels gain energy.
+ - After 60 seconds a lantern settles into a permanent static pixel.
+ 
++## Purposes
++- Every 20 to 40 seconds a **purpose** drops onto the terrain somewhere in the cube (or press O to drop one under the mouse). Up to 3 at once.
++- Kinds take different amounts of work and need different numbers of helpers present before any work counts:
++
++| Purpose | Work | Helpers needed | Helpers wanted |
++|---|---|---|---|
++| Spark | 150 | 1 | 2 |
++| Knot | 600 | 2 | 4 |
++| Riddle | 1800 | 4 | 6 |
++| Monolith | 4800 | 6 | 10 |
++
++- An idle cell that comes within 20 voxels of an undiscovered purpose becomes its **scout** and goes to check it out.
++- Having found it, the scout becomes a **herald**: it heads back to the middle of the idle swarm, telling every idle cell within earshot, who become **workers**.
++- Workers travel to the purpose and pass the word to idle cells they pass on the way.
++- If workers are waiting at a purpose without enough helpers, one of them goes back as a herald to fetch more.
++- When the work is done, **every cell that worked on it gets the same reward**: energy and a boost to its sense of being used.
++
++## Moods
++- Each cell keeps a rolling measure of how much of its recent life it has had a purpose.
++- Moods: **purposeless** (rarely used), **content**, **purposeful** (has a purpose now), **proud** (used most of the time).
++- Mood is a problem-solving multiplier: it scales work rate and how often a cell gets round an obstacle (climbing, tunnelling, dropping cargo) instead of fumbling sideways.
++
++| Mood | Multiplier |
++|---|---|
++| purposeless | 0.6 |
++| content | 0.9 |
++| purposeful | 1.15 |
++| proud | 1.3 |
++
++- Every 8 to 20 seconds each cell says how it feels in a speech bubble, and it's logged.
++
+ ## Limits
+ 64 cells, 24 lanterns, one action per cell per tick. P pauses everything instantly; K wipes all life.
+ 
+@@ -30,6 +61,7 @@ A GameMaker project. A living pixel inside a 256 x 256 x 256 voxel room.
+ | Key | Action |
+ |---|---|
+ | Space | Seed a cell at the surface under the mouse |
++| O | Drop a purpose at the surface under the mouse |
+ | Left mouse | Add static pixels to the surface under the mouse |
+ | Right mouse | Remove static pixels from the surface under the mouse |
+ | Mouse wheel | Brush size |
+@@ -43,4 +75,5 @@ A GameMaker project. A living pixel inside a 256 x 256 x 256 voxel room.
+ - `obj_cellular_world`: voxel store, projections, limits, gatekeeper, input.
+ - `obj_cell`: the living pixel, its genome and life choice.
+ - `obj_lantern`: the special pixel.
+-- `rm_cellular`: 768 x 848 room (256 x 256 world at 3x, plus a status bar).
++- `obj_purpose`: a purpose to be found, shared and worked on.
++- `rm_cellular`: 768 x 872 room (256 x 256 world at 3x, plus a status bar).
+diff --git a/objects/obj_cell/Create_0.gml b/objects/obj_cell/Create_0.gml
+index 011814d..17a5bef 100644
+--- a/objects/obj_cell/Create_0.gml
++++ b/objects/obj_cell/Create_0.gml
+@@ -20,6 +20,18 @@ heading_x = 0;
+ heading_y = 0;
+ heading_z = -1;
+ 
++// Purpose and mood
++purpose_target = noone;
++role           = "idle";
++rally_timer    = 0;
++wait_timer     = 0;
++usage          = 0.3;
++mood           = "content";
++mood_factor    = 0.9;
++express_timer  = irandom_range(_world.limits.express_min_steps, _world.limits.express_max_steps);
++bubble_text    = "";
++bubble_timer   = 0;
++
+ _world.set_voxel(cx, cy, cz, _world.voxel_cell);
+ 
+ pick_heading = function() {
+@@ -267,3 +279,244 @@ make_life_choice = function() {
+         try_become_lantern();
+     }
+ };
++
++// ---------------------------------------------------------------- feelings
++
++say = function(_text) {
++    bubble_text  = _text;
++    bubble_timer = global.cellular_world.limits.bubble_steps;
++};
++
++// usage is a rolling measure of how much of its recent life this cell has had a purpose.
++update_mood = function() {
++    var _world  = global.cellular_world;
++    var _limits = _world.limits;
++    var _used   = 0;
++    if (role != "idle") {
++        _used = 1;
++    }
++    usage = (usage * (1 - _limits.usage_rate)) + (_used * _limits.usage_rate);
++
++    if (usage >= _limits.proud_threshold) {
++        mood = "proud";
++    } else if (role != "idle") {
++        mood = "purposeful";
++    } else if (usage < _limits.purposeless_threshold) {
++        mood = "purposeless";
++    } else {
++        mood = "content";
++    }
++    mood_factor = _world.mood_factors[$ mood];
++};
++
++express = function() {
++    var _world = global.cellular_world;
++    var _lines = _world.mood_lines[$ mood];
++    var _line  = _lines[irandom(array_length(_lines) - 1)];
++    say(_line);
++    _world.log_action(id, "feels", mood, _line);
++};
++
++// ---------------------------------------------------------------- purposes
++
++// Head for a target. When blocked, mood decides how often the cell solves it
++// (climb over, tunnel through, or drop cargo) instead of fumbling sideways.
++step_toward = function(_tx, _ty, _tz) {
++    var _dx = sign(_tx - cx);
++    var _dy = sign(_ty - cy);
++    var _dz = sign(_tz - cz);
++    if (_dx == 0 && _dy == 0 && _dz == 0) {
++        return true;
++    }
++    if (try_move(_dx, _dy, _dz)) {
++        return true;
++    }
++    if (random(1) < 0.5 * mood_factor) {
++        if (try_move(_dx, _dy, 1)) {
++            return true;
++        }
++        if (try_move(0, 0, 1)) {
++            return true;
++        }
++        if (carried < genome.carry_max) {
++            if (try_dig(_dx, _dy, _dz)) {
++                return true;
++            }
++        } else {
++            if (try_place(-_dx, -_dy, 0)) {
++                return true;
++            }
++        }
++    }
++    pick_heading();
++    return try_move(heading_x, heading_y, heading_z);
++};
++
++// Idle cells notice nearby purposes: undiscovered ones to scout, or discovered ones still short of help.
++look_for_purpose = function() {
++    var _limits    = global.cellular_world.limits;
++    var _best      = noone;
++    var _best_dist = _limits.perception_radius + 1;
++    var _x         = cx;
++    var _y         = cy;
++    var _z         = cz;
++
++    with (obj_purpose) {
++        var _d = point_distance_3d(px, py, pz, _x, _y, _z);
++        if (_d < _best_dist) {
++            var _wanted = false;
++            if (!discovered) {
++                if (!instance_exists(scout)) {
++                    _wanted = true;
++                }
++            } else {
++                if (assigned_count() < want_helpers) {
++                    _wanted = true;
++                }
++            }
++            if (_wanted) {
++                _best      = id;
++                _best_dist = _d;
++            }
++        }
++    }
++
++    if (!instance_exists(_best)) {
++        return false;
++    }
++
++    purpose_target = _best;
++    wait_timer     = 0;
++    if (!_best.discovered) {
++        _best.scout = id;
++        role = "scout";
++        say("what's that?");
++    } else {
++        role = "worker";
++        say("I'll help!");
++    }
++    return true;
++};
++
++// Tell idle cells within a radius about this cell's purpose, up to the number still wanted.
++recruit_nearby = function(_radius) {
++    var _p      = purpose_target;
++    var _needed = _p.want_helpers - _p.assigned_count();
++    if (_needed <= 0) {
++        return 0;
++    }
++
++    var _x         = cx;
++    var _y         = cy;
++    var _z         = cz;
++    var _recruited = 0;
++
++    with (obj_cell) {
++        if (_recruited < _needed) {
++            if (role == "idle") {
++                if (point_distance_3d(cx, cy, cz, _x, _y, _z) <= _radius) {
++                    purpose_target = _p;
++                    role           = "worker";
++                    wait_timer     = 0;
++                    say("coming!");
++                    _recruited += 1;
++                }
++            }
++        }
++    }
++
++    if (_recruited > 0) {
++        global.cellular_world.log_action(id, "inform", "recruited " + string(_recruited), _p.label);
++    }
++    return _recruited;
++};
++
++// Average position of the idle swarm.
++swarm_centre = function() {
++    var _centre = { ok : false, vx : 0, vy : 0, vz : 0 };
++    var _sx     = 0;
++    var _sy     = 0;
++    var _sz     = 0;
++    var _n      = 0;
++    with (obj_cell) {
++        if (role == "idle") {
++            _sx += cx;
++            _sy += cy;
++            _sz += cz;
++            _n  += 1;
++        }
++    }
++    if (_n > 0) {
++        _centre.ok = true;
++        _centre.vx = round(_sx / _n);
++        _centre.vy = round(_sy / _n);
++        _centre.vz = round(_sz / _n);
++    }
++    return _centre;
++};
++
++// scout:  go and check the purpose out
++// herald: head back to the swarm, telling everyone in earshot
++// worker: travel to the purpose (relaying as it goes) and work once enough helpers are there
++purpose_turn = function() {
++    var _world  = global.cellular_world;
++    var _limits = _world.limits;
++
++    if (!instance_exists(purpose_target)) {
++        purpose_target = noone;
++        role           = "idle";
++        return;
++    }
++
++    var _p    = purpose_target;
++    var _dist = point_distance_3d(cx, cy, cz, _p.px, _p.py, _p.pz);
++
++    if (role == "scout") {
++        if (_dist <= _limits.work_radius + 1) {
++            _p.discovered = true;
++            role          = "herald";
++            rally_timer   = _limits.rally_ticks;
++            say("a " + _p.label + "! follow me!");
++            _world.log_action(id, "purpose", "discovered", _p.label);
++        } else {
++            step_toward(_p.px, _p.py, _p.pz);
++        }
++        return;
++    }
++
++    if (role == "herald") {
++        rally_timer -= 1;
++        recruit_nearby(_limits.hearing_radius);
++        var _centre = swarm_centre();
++        if (!_centre.ok || rally_timer <= 0 || _p.assigned_count() >= _p.want_helpers) {
++            role       = "worker";
++            wait_timer = 0;
++        } else {
++            step_toward(_centre.vx, _centre.vy, _centre.vz);
++        }
++        return;
++    }
++
++    if (_dist > _limits.work_radius) {
++        recruit_nearby(_limits.relay_radius);
++        step_toward(_p.px, _p.py, _p.pz);
++        return;
++    }
++
++    if (_p.helpers_present() >= _p.min_helpers) {
++        wait_timer = 0;
++        if (_world.request_action(id, "work")) {
++            _p.apply_work(id, _limits.work_rate * mood_factor);
++        }
++    } else {
++        wait_timer += 1;
++        if (wait_timer >= _limits.wait_ticks) {
++            wait_timer = 0;
++            if (_p.assigned_count() < _p.min_helpers) {
++                role        = "herald";
++                rally_timer = _limits.rally_ticks;
++                say("need more help!");
++            }
++        }
++    }
++};
+diff --git a/objects/obj_cell/Draw_0.gml b/objects/obj_cell/Draw_0.gml
+index 1a7c3a8..0dae56d 100644
+--- a/objects/obj_cell/Draw_0.gml
++++ b/objects/obj_cell/Draw_0.gml
+@@ -1,3 +1,7 @@
+ /// obj_cell - Draw
+ 
+ global.cellular_world.draw_marker(cx, cy, cz, false, 0);
++
++if (bubble_timer > 0) {
++    global.cellular_world.draw_bubble(cx, cy, cz, bubble_text);
++}
+diff --git a/objects/obj_cell/Step_0.gml b/objects/obj_cell/Step_0.gml
+index 6e251c1..22e5e9d 100644
+--- a/objects/obj_cell/Step_0.gml
++++ b/objects/obj_cell/Step_0.gml
+@@ -13,7 +13,25 @@ decision_timer += 1;
+ if (tick_timer >= _limits.tick_steps) {
+     tick_timer        = 0;
+     actions_this_tick = 0;
+-    take_turn();
++    update_mood();
++    if (role == "idle") {
++        look_for_purpose();
++    }
++    if (role == "idle") {
++        take_turn();
++    } else {
++        purpose_turn();
++    }
++}
++
++express_timer -= 1;
++if (express_timer <= 0) {
++    express();
++    express_timer = irandom_range(_limits.express_min_steps, _limits.express_max_steps);
++}
++
++if (bubble_timer > 0) {
++    bubble_timer -= 1;
+ }
+ 
+ if (decision_timer >= _limits.decision_steps) {
+diff --git a/objects/obj_cellular_world/Create_0.gml b/objects/obj_cellular_world/Create_0.gml
+index d324ea9..d909a33 100644
+--- a/objects/obj_cellular_world/Create_0.gml
++++ b/objects/obj_cellular_world/Create_0.gml
+@@ -18,6 +18,7 @@ voxel_empty   = 0;
+ voxel_static  = 1;
+ voxel_cell    = 2;
+ voxel_lantern = 3;
++voxel_purpose = 4;
+ 
+ // 16 MB voxel store. Index = z + (x * 256) + (y * 65536) so every Z column is contiguous.
+ voxels = buffer_create(world_volume, buffer_fixed, 1);
+@@ -58,15 +59,65 @@ limits = {
+     energy_regen         : 0.002,
+     crowd_radius         : 12,
+     lantern_life         : game_get_speed(gamespeed_fps) * 60,
+-    allowed              : ["move", "dig", "place", "clone", "become_lantern"]
++
++    // Purposes
++    max_purposes         : 3,
++    purpose_interval_min : game_get_speed(gamespeed_fps) * 20,
++    purpose_interval_max : game_get_speed(gamespeed_fps) * 40,
++    perception_radius    : 20,
++    hearing_radius       : 28,
++    relay_radius         : 8,
++    work_radius          : 2,
++    work_rate            : 1,
++    rally_ticks          : 60,
++    wait_ticks           : 40,
++    reward_energy        : 0.5,
++    reward_pride         : 0.25,
++
++    // Mood
++    usage_rate           : 0.0017,
++    proud_threshold      : 0.6,
++    purposeless_threshold: 0.15,
++    express_min_steps    : game_get_speed(gamespeed_fps) * 8,
++    express_max_steps    : game_get_speed(gamespeed_fps) * 20,
++    bubble_steps         : game_get_speed(gamespeed_fps) * 3,
++
++    allowed              : ["move", "dig", "place", "clone", "become_lantern", "work"]
++};
++
++// Purposes take different amounts of work and need different numbers of helpers present.
++purpose_kinds = [
++    { name : "Spark",    work : 150,  min_helpers : 1, want_helpers : 2  },
++    { name : "Knot",     work : 600,  min_helpers : 2, want_helpers : 4  },
++    { name : "Riddle",   work : 1800, min_helpers : 4, want_helpers : 6  },
++    { name : "Monolith", work : 4800, min_helpers : 6, want_helpers : 10 }
++];
++
++// Problem-solving multiplier per mood: applies to work rate and to getting round obstacles.
++mood_factors = {
++    purposeless : 0.6,
++    content     : 0.9,
++    purposeful  : 1.15,
++    proud       : 1.3
+ };
+ 
++mood_lines = {
++    purposeless : ["purposeless...", "what am I for?", "drifting", "nothing to do"],
++    content     : ["all is fine", "just digging", "hmm"],
++    purposeful  : ["I have a purpose!", "on my way!", "this matters"],
++    proud       : ["proud - I'm needed", "we keep going", "useful again"]
++};
++
++purpose_timer      = 0;
++completed_purposes = 0;
++
+ action_counts = {
+     move           : 0,
+     dig            : 0,
+     place          : 0,
+     clone          : 0,
+-    become_lantern : 0
++    become_lantern : 0,
++    work           : 0
+ };
+ 
+ action_log = [];
+@@ -236,6 +287,9 @@ wipe_life = function() {
+ 
+ clear_world_data = function() {
+     wipe_life();
++    with (obj_purpose) {
++        instance_destroy();
++    }
+     buffer_fill(voxels, 0, buffer_u8, voxel_empty, world_volume);
+     ds_grid_clear(top_cache, -1);
+     ds_grid_clear(front_cache, world_size);
+@@ -342,6 +396,44 @@ spawn_lantern = function(_x, _y, _z) {
+     });
+ };
+ 
++// ---------------------------------------------------------------- purposes
++
++next_purpose_interval = function() {
++    return irandom_range(limits.purpose_interval_min, limits.purpose_interval_max);
++};
++
++spawn_purpose = function(_x, _y, _z, _kind_index) {
++    if (instance_number(obj_purpose) >= limits.max_purposes) {
++        return noone;
++    }
++    if (get_voxel(_x, _y, _z) != voxel_empty) {
++        return noone;
++    }
++    var _purpose = instance_create_depth(0, 0, 5, obj_purpose, {
++        spawn_x    : _x,
++        spawn_y    : _y,
++        spawn_z    : _z,
++        spawn_kind : _kind_index
++    });
++    log_action("world", "purpose", "dropped", purpose_kinds[_kind_index].name);
++    return _purpose;
++};
++
++// Drop a purpose on the terrain surface somewhere in the cube.
++drop_random_purpose = function() {
++    repeat (20) {
++        var _x = irandom(world_size - 1);
++        var _y = irandom(world_size - 1);
++        var _z = top_cache[# _x, _y] + 1;
++        if (_z < world_size) {
++            if (get_voxel(_x, _y, _z) == voxel_empty) {
++                return spawn_purpose(_x, _y, _z, irandom(array_length(purpose_kinds) - 1));
++            }
++        }
++    }
++    return noone;
++};
++
+ log_action = function(_who, _action, _result, _reason) {
+     array_push(action_log, { who : string(_who), action : _action, result : _result, reason : _reason });
+     if (array_length(action_log) > log_max) {
+@@ -478,28 +570,31 @@ sculpt_at = function(_view, _px, _py, _add) {
+ 
+ // ---------------------------------------------------------------- drawing living pixels
+ 
+-draw_marker = function(_vx, _vy, _vz, _is_lantern, _halo_radius) {
+-    var _sx    = 0;
+-    var _sy    = 0;
+-    var _value = 0;
++// Voxel to screen for the current view. value is the depth used for the grey.
++project = function(_vx, _vy, _vz) {
++    var _p = { sx : 0, sy : 0, value : 0 };
+     if (view_mode == 0) {
+-        _sx    = _vx;
+-        _sy    = _vy;
+-        _value = _vz;
++        _p.sx    = _vx;
++        _p.sy    = _vy;
++        _p.value = _vz;
+     } else if (view_mode == 1) {
+-        _sx    = _vx;
+-        _sy    = world_size - 1 - _vz;
+-        _value = world_size - 1 - _vy;
++        _p.sx    = _vx;
++        _p.sy    = world_size - 1 - _vz;
++        _p.value = world_size - 1 - _vy;
+     } else {
+-        _sx    = _vy;
+-        _sy    = world_size - 1 - _vz;
+-        _value = world_size - 1 - _vx;
++        _p.sx    = _vy;
++        _p.sy    = world_size - 1 - _vz;
++        _p.value = world_size - 1 - _vx;
+     }
++    return _p;
++};
+ 
++draw_marker = function(_vx, _vy, _vz, _is_lantern, _halo_radius) {
++    var _p     = project(_vx, _vy, _vz);
+     var _s     = display_scale;
+-    var _left  = _sx * _s;
+-    var _top   = _sy * _s;
+-    var _shade = shade_for(_value);
++    var _left  = _p.sx * _s;
++    var _top   = _p.sy * _s;
++    var _shade = shade_for(_p.value);
+ 
+     if (_is_lantern) {
+         draw_set_colour(c_white);
+@@ -526,4 +621,64 @@ draw_marker = function(_vx, _vy, _vz, _is_lantern, _halo_radius) {
+     draw_set_colour(c_white);
+ };
+ 
++// A small speech bubble above a living pixel.
++draw_bubble = function(_vx, _vy, _vz, _text) {
++    var _p  = project(_vx, _vy, _vz);
++    var _s  = display_scale;
++    var _cx = (_p.sx * _s) + (_s * 0.5);
++    var _by = (_p.sy * _s) - 6;
++    var _w  = string_width(_text) + 8;
++    var _h  = string_height(_text) + 4;
++
++    draw_set_alpha(0.8);
++    draw_set_colour(c_black);
++    draw_rectangle(_cx - (_w * 0.5), _by - _h, _cx + (_w * 0.5), _by, false);
++    draw_set_alpha(1);
++    draw_set_colour(c_white);
++    draw_rectangle(_cx - (_w * 0.5), _by - _h, _cx + (_w * 0.5), _by, true);
++    draw_set_halign(fa_center);
++    draw_set_valign(fa_bottom);
++    draw_text(_cx, _by - 2, _text);
++    draw_set_halign(fa_left);
++    draw_set_valign(fa_top);
++};
++
++draw_purpose = function(_vx, _vy, _vz, _label, _progress, _discovered) {
++    var _p     = project(_vx, _vy, _vz);
++    var _s     = display_scale;
++    var _cx    = (_p.sx * _s) + (_s * 0.5);
++    var _cy    = (_p.sy * _s) + (_s * 0.5);
++    var _pulse = 6 + (2 * sin(current_time / 200));
++
++    draw_set_colour(c_white);
++    draw_primitive_begin(pr_linestrip);
++    draw_vertex(_cx, _cy - _pulse);
++    draw_vertex(_cx + _pulse, _cy);
++    draw_vertex(_cx, _cy + _pulse);
++    draw_vertex(_cx - _pulse, _cy);
++    draw_vertex(_cx, _cy - _pulse);
++    draw_primitive_end();
++
++    var _shade = shade_for(_p.value);
++    draw_set_colour(make_colour_rgb(_shade, _shade, _shade));
++    draw_rectangle(_cx - 2, _cy - 2, _cx + 2, _cy + 2, false);
++
++    // Progress bar
++    draw_set_colour(c_dkgray);
++    draw_rectangle(_cx - 12, _cy + 10, _cx + 12, _cy + 12, false);
++    draw_set_colour(c_white);
++    draw_rectangle(_cx - 12, _cy + 10, _cx - 12 + (24 * _progress), _cy + 12, false);
++
++    var _text = "?";
++    if (_discovered) {
++        _text = _label + " " + string(floor(_progress * 100)) + "%";
++    }
++    draw_set_halign(fa_center);
++    draw_set_valign(fa_top);
++    draw_text(_cx, _cy + 14, _text);
++    draw_set_halign(fa_left);
++};
++
++purpose_timer = next_purpose_interval();
++
+ generate_terrain();
+diff --git a/objects/obj_cellular_world/Draw_64.gml b/objects/obj_cellular_world/Draw_64.gml
+index fd89699..cb28309 100644
+--- a/objects/obj_cellular_world/Draw_64.gml
++++ b/objects/obj_cellular_world/Draw_64.gml
+@@ -15,12 +15,32 @@ draw_text(8, ui_top + 22, "cells " + string(instance_number(obj_cell)) + "/" + s
+     + "   lanterns " + string(instance_number(obj_lantern)) + "/" + string(limits.max_lanterns)
+     + "   clones " + string(action_counts.clone)
+     + "   lantern choices " + string(action_counts.become_lantern)
++    + "   purposes " + string(instance_number(obj_purpose)) + "/" + string(limits.max_purposes)
++    + "   done " + string(completed_purposes)
+     + "   brush " + string(brush_radius));
+ 
+-draw_text(8, ui_top + 40, "Space seed   LMB add   RMB remove   Wheel brush   V view   G terrain   C clear   P pause   K wipe life");
++var _purposeless = 0;
++var _content     = 0;
++var _purposeful  = 0;
++var _proud       = 0;
++with (obj_cell) {
++    if (mood == "purposeless") {
++        _purposeless += 1;
++    } else if (mood == "content") {
++        _content += 1;
++    } else if (mood == "purposeful") {
++        _purposeful += 1;
++    } else {
++        _proud += 1;
++    }
++}
++draw_text(8, ui_top + 40, "moods   purposeless " + string(_purposeless) + "   content " + string(_content)
++    + "   purposeful " + string(_purposeful) + "   proud " + string(_proud));
++
++draw_text(8, ui_top + 58, "Space seed   O purpose   LMB add   RMB remove   Wheel brush   V view   G terrain   C clear   P pause   K wipe life");
+ 
+ var _count = array_length(action_log);
+ if (_count > 0) {
+     var _last = action_log[_count - 1];
+-    draw_text(8, ui_top + 58, "last: " + _last.who + "  " + _last.action + "  " + _last.result + "  " + _last.reason);
++    draw_text(8, ui_top + 76, "last: " + _last.who + "  " + _last.action + "  " + _last.result + "  " + _last.reason);
+ }
+diff --git a/objects/obj_cellular_world/Step_0.gml b/objects/obj_cellular_world/Step_0.gml
+index 6066c20..0450eee 100644
+--- a/objects/obj_cellular_world/Step_0.gml
++++ b/objects/obj_cellular_world/Step_0.gml
+@@ -24,6 +24,15 @@ if (keyboard_check_pressed(ord("C"))) {
+     clear_world();
+ }
+ 
++// Purposes drop in every so often.
++if (!global.cellular_paused) {
++    purpose_timer -= 1;
++    if (purpose_timer <= 0) {
++        drop_random_purpose();
++        purpose_timer = next_purpose_interval();
++    }
++}
++
+ if (mouse_wheel_up()) {
+     brush_radius = min(brush_max, brush_radius + 1);
+ }
+@@ -45,6 +54,16 @@ if (_px >= 0 && _py >= 0 && _px < world_size && _py < world_size) {
+         }
+     }
+ 
++    if (keyboard_check_pressed(ord("O"))) {
++        var _drop = surface_slot(view_mode, _px, _py);
++        if (_drop.ok) {
++            var _purpose = spawn_purpose(_drop.vx, _drop.vy, _drop.vz, irandom(array_length(purpose_kinds) - 1));
++            if (!instance_exists(_purpose)) {
++                log_action("world", "purpose", "refused", "purpose cap or occupied");
++            }
++        }
++    }
++
+     if (mouse_check_button(mb_left)) {
+         sculpt_at(view_mode, _px, _py, true);
+     }
+diff --git a/objects/obj_purpose/Create_0.gml b/objects/obj_purpose/Create_0.gml
+new file mode 100644
+index 0000000..e566f1a
+--- /dev/null
++++ b/objects/obj_purpose/Create_0.gml
+@@ -0,0 +1,101 @@
++/// obj_purpose - Create
++/// A purpose dropped into the cube. A cell must find it, tell the swarm,
++/// and enough helpers must be present to work on it. Everyone who worked
++/// on it is rewarded equally when it is complete.
++
++var _world = global.cellular_world;
++
++px = spawn_x;
++py = spawn_y;
++pz = spawn_z;
++
++kind         = _world.purpose_kinds[spawn_kind];
++label        = kind.name;
++work_needed  = kind.work;
++min_helpers  = kind.min_helpers;
++want_helpers = kind.want_helpers;
++work_done    = 0;
++discovered   = false;
++scout        = noone;
++contributors = [];
++completed    = false;
++
++_world.set_voxel(px, py, pz, _world.voxel_purpose);
++
++// Cells currently signed up to this purpose, wherever they are.
++assigned_count = function() {
++    var _me    = id;
++    var _count = 0;
++    with (obj_cell) {
++        if (purpose_target == _me) {
++            if (role != "idle") {
++                _count += 1;
++            }
++        }
++    }
++    return _count;
++};
++
++// Signed-up cells close enough to work.
++helpers_present = function() {
++    var _me     = id;
++    var _x      = px;
++    var _y      = py;
++    var _z      = pz;
++    var _radius = global.cellular_world.limits.work_radius + 1;
++    var _count  = 0;
++    with (obj_cell) {
++        if (purpose_target == _me) {
++            if (point_distance_3d(cx, cy, cz, _x, _y, _z) <= _radius) {
++                _count += 1;
++            }
++        }
++    }
++    return _count;
++};
++
++apply_work = function(_cell, _amount) {
++    work_done += _amount;
++    var _known = false;
++    for (var i = 0; i < array_length(contributors); i++) {
++        if (contributors[i] == _cell) {
++            _known = true;
++        }
++    }
++    if (!_known) {
++        array_push(contributors, _cell);
++    }
++};
++
++// Equal reward for every contributor; anyone still en route is released.
++complete = function() {
++    var _world  = global.cellular_world;
++    var _me     = id;
++    var _energy = _world.limits.reward_energy;
++    var _pride  = _world.limits.reward_pride;
++    var _shared = 0;
++
++    for (var i = 0; i < array_length(contributors); i++) {
++        var _cell = contributors[i];
++        if (instance_exists(_cell)) {
++            with (_cell) {
++                energy = min(1, energy + _energy);
++                usage  = min(1, usage + _pride);
++                say("we did it!");
++            }
++            _shared += 1;
++        }
++    }
++
++    with (obj_cell) {
++        if (purpose_target == _me) {
++            purpose_target = noone;
++            role           = "idle";
++        }
++    }
++
++    _world.completed_purposes += 1;
++    _world.log_action(id, "purpose", "completed", label + " - shared by " + string(_shared));
++    completed = true;
++    instance_destroy();
++};
+diff --git a/objects/obj_purpose/Destroy_0.gml b/objects/obj_purpose/Destroy_0.gml
+new file mode 100644
+index 0000000..1030c1f
+--- /dev/null
++++ b/objects/obj_purpose/Destroy_0.gml
+@@ -0,0 +1,16 @@
++/// obj_purpose - Destroy
++
++var _world = global.cellular_world;
++if (instance_exists(_world)) {
++    if (_world.get_voxel(px, py, pz) == _world.voxel_purpose) {
++        _world.set_voxel(px, py, pz, _world.voxel_empty);
++    }
++}
++
++var _me = id;
++with (obj_cell) {
++    if (purpose_target == _me) {
++        purpose_target = noone;
++        role           = "idle";
++    }
++}
+diff --git a/objects/obj_purpose/Draw_0.gml b/objects/obj_purpose/Draw_0.gml
+new file mode 100644
+index 0000000..6c4fc62
+--- /dev/null
++++ b/objects/obj_purpose/Draw_0.gml
+@@ -0,0 +1,3 @@
++/// obj_purpose - Draw
++
++global.cellular_world.draw_purpose(px, py, pz, label, min(1, work_done / work_needed), discovered);
+diff --git a/objects/obj_purpose/Step_0.gml b/objects/obj_purpose/Step_0.gml
+new file mode 100644
+index 0000000..6dd5939
+--- /dev/null
++++ b/objects/obj_purpose/Step_0.gml
+@@ -0,0 +1,11 @@
++/// obj_purpose - Step
++
++if (global.cellular_paused) {
++    exit;
++}
++
++if (!completed) {
++    if (work_done >= work_needed) {
++        complete();
++    }
++}
+diff --git a/objects/obj_purpose/obj_purpose.yy b/objects/obj_purpose/obj_purpose.yy
+new file mode 100644
+index 0000000..69bebf4
+--- /dev/null
++++ b/objects/obj_purpose/obj_purpose.yy
+@@ -0,0 +1,38 @@
++{
++  "$GMObject":"",
++  "%Name":"obj_purpose",
++  "eventList":[
++    {"$GMEvent":"v1","%Name":"","collisionObjectId":null,"eventNum":0,"eventType":0,"isDnD":false,"name":"","resourceType":"GMEvent","resourceVersion":"2.0",},
++    {"$GMEvent":"v1","%Name":"","collisionObjectId":null,"eventNum":0,"eventType":1,"isDnD":false,"name":"","resourceType":"GMEvent","resourceVersion":"2.0",},
++    {"$GMEvent":"v1","%Name":"","collisionObjectId":null,"eventNum":0,"eventType":3,"isDnD":false,"name":"","resourceType":"GMEvent","resourceVersion":"2.0",},
++    {"$GMEvent":"v1","%Name":"","collisionObjectId":null,"eventNum":0,"eventType":8,"isDnD":false,"name":"","resourceType":"GMEvent","resourceVersion":"2.0",},
++  ],
++  "managed":true,
++  "name":"obj_purpose",
++  "overriddenProperties":[],
++  "parent":{
++    "name":"Objects",
++    "path":"folders/Objects.yy",
++  },
++  "parentObjectId":null,
++  "persistent":false,
++  "physicsAngularDamping":0.1,
++  "physicsDensity":0.5,
++  "physicsFriction":0.2,
++  "physicsGroup":1,
++  "physicsKinematic":false,
++  "physicsLinearDamping":0.1,
++  "physicsObject":false,
++  "physicsRestitution":0.1,
++  "physicsSensor":false,
++  "physicsShape":1,
++  "physicsShapePoints":[],
++  "physicsStartAwake":true,
++  "properties":[],
++  "resourceType":"GMObject",
++  "resourceVersion":"2.0",
++  "solid":false,
++  "spriteId":null,
++  "spriteMaskId":null,
++  "visible":true,
++}
+\ No newline at end of file
+diff --git a/rooms/rm_cellular/rm_cellular.yy b/rooms/rm_cellular/rm_cellular.yy
+index acdc558..d3a9d24 100644
+--- a/rooms/rm_cellular/rm_cellular.yy
++++ b/rooms/rm_cellular/rm_cellular.yy
+@@ -31,21 +31,21 @@
+   "resourceType":"GMRoom",
+   "resourceVersion":"2.0",
+   "roomSettings":{
+-    "Height":848,
++    "Height":872,
+     "inheritRoomSettings":false,
+     "persistent":false,
+     "Width":768,
+   },
+   "sequenceId":null,
+   "views":[
+-    {"hborder":32,"hport":848,"hspeed":-1,"hview":848,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
+-    {"hborder":32,"hport":848,"hspeed":-1,"hview":848,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
+-    {"hborder":32,"hport":848,"hspeed":-1,"hview":848,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
+-    {"hborder":32,"hport":848,"hspeed":-1,"hview":848,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
+-    {"hborder":32,"hport":848,"hspeed":-1,"hview":848,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
+-    {"hborder":32,"hport":848,"hspeed":-1,"hview":848,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
+-    {"hborder":32,"hport":848,"hspeed":-1,"hview":848,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
+-    {"hborder":32,"hport":848,"hspeed":-1,"hview":848,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
++    {"hborder":32,"hport":872,"hspeed":-1,"hview":872,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
++    {"hborder":32,"hport":872,"hspeed":-1,"hview":872,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
++    {"hborder":32,"hport":872,"hspeed":-1,"hview":872,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
++    {"hborder":32,"hport":872,"hspeed":-1,"hview":872,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
++    {"hborder":32,"hport":872,"hspeed":-1,"hview":872,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
++    {"hborder":32,"hport":872,"hspeed":-1,"hview":872,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
++    {"hborder":32,"hport":872,"hspeed":-1,"hview":872,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
++    {"hborder":32,"hport":872,"hspeed":-1,"hview":872,"inherit":false,"objectId":null,"vborder":32,"visible":false,"vspeed":-1,"wport":768,"wview":768,"xport":0,"xview":0,"yport":0,"yview":0,},
+   ],
+   "viewSettings":{
+     "clearDisplayBuffer":true,

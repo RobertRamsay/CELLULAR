@@ -23,6 +23,37 @@ A GameMaker project. A living pixel inside a 256 x 256 x 256 voxel room.
 - Every half second, floating static pixels within 6 voxels drop one level until supported, and cells within 10 voxels gain energy.
 - After 60 seconds a lantern settles into a permanent static pixel.
 
+## Purposes
+- Every 20 to 40 seconds a **purpose** drops onto the terrain somewhere in the cube (or press O to drop one under the mouse). Up to 3 at once.
+- Kinds take different amounts of work and need different numbers of helpers present before any work counts:
+
+| Purpose | Work | Helpers needed | Helpers wanted |
+|---|---|---|---|
+| Spark | 150 | 1 | 2 |
+| Knot | 600 | 2 | 4 |
+| Riddle | 1800 | 4 | 6 |
+| Monolith | 4800 | 6 | 10 |
+
+- An idle cell that comes within 20 voxels of an undiscovered purpose becomes its **scout** and goes to check it out.
+- Having found it, the scout becomes a **herald**: it heads back to the middle of the idle swarm, telling every idle cell within earshot, who become **workers**.
+- Workers travel to the purpose and pass the word to idle cells they pass on the way.
+- If workers are waiting at a purpose without enough helpers, one of them goes back as a herald to fetch more.
+- When the work is done, **every cell that worked on it gets the same reward**: energy and a boost to its sense of being used.
+
+## Moods
+- Each cell keeps a rolling measure of how much of its recent life it has had a purpose.
+- Moods: **purposeless** (rarely used), **content**, **purposeful** (has a purpose now), **proud** (used most of the time).
+- Mood is a problem-solving multiplier: it scales work rate and how often a cell gets round an obstacle (climbing, tunnelling, dropping cargo) instead of fumbling sideways.
+
+| Mood | Multiplier |
+|---|---|
+| purposeless | 0.6 |
+| content | 0.9 |
+| purposeful | 1.15 |
+| proud | 1.3 |
+
+- Every 8 to 20 seconds each cell says how it feels in a speech bubble, and it's logged.
+
 ## Limits
 64 cells, 24 lanterns, one action per cell per tick. P pauses everything instantly; K wipes all life.
 
@@ -30,6 +61,7 @@ A GameMaker project. A living pixel inside a 256 x 256 x 256 voxel room.
 | Key | Action |
 |---|---|
 | Space | Seed a cell at the surface under the mouse |
+| O | Drop a purpose at the surface under the mouse |
 | Left mouse | Add static pixels to the surface under the mouse |
 | Right mouse | Remove static pixels from the surface under the mouse |
 | Mouse wheel | Brush size |
@@ -43,4 +75,5 @@ A GameMaker project. A living pixel inside a 256 x 256 x 256 voxel room.
 - `obj_cellular_world`: voxel store, projections, limits, gatekeeper, input.
 - `obj_cell`: the living pixel, its genome and life choice.
 - `obj_lantern`: the special pixel.
-- `rm_cellular`: 768 x 848 room (256 x 256 world at 3x, plus a status bar).
+- `obj_purpose`: a purpose to be found, shared and worked on.
+- `rm_cellular`: 768 x 872 room (256 x 256 world at 3x, plus a status bar).

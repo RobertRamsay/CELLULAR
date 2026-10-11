@@ -13,7 +13,25 @@ decision_timer += 1;
 if (tick_timer >= _limits.tick_steps) {
     tick_timer        = 0;
     actions_this_tick = 0;
-    take_turn();
+    update_mood();
+    if (role == "idle") {
+        look_for_purpose();
+    }
+    if (role == "idle") {
+        take_turn();
+    } else {
+        purpose_turn();
+    }
+}
+
+express_timer -= 1;
+if (express_timer <= 0) {
+    express();
+    express_timer = irandom_range(_limits.express_min_steps, _limits.express_max_steps);
+}
+
+if (bubble_timer > 0) {
+    bubble_timer -= 1;
 }
 
 if (decision_timer >= _limits.decision_steps) {
