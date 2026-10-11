@@ -103,6 +103,16 @@ limits = {
     rank_speed_bonus     : 1,
     rank_sense_bonus     : 2,
 
+    // Outreach: when purposelessness is high, proud cells roam to find the purposeless.
+    outreach_threshold   : 0.25,
+    outreach_check_steps : 30,
+    roam_min             : 40,
+    roam_max             : 120,
+    connect_pride        : 0.15,
+    connect_speed_boost  : 1,
+    connect_sense_boost  : 10,
+    connect_boost_steps  : game_get_speed(gamespeed_fps) * 10,
+
     // Speech: mood expressions share a global budget so 1024 cells don't drown the screen.
     speech_gap_steps     : 15,
 
@@ -138,6 +148,10 @@ purpose_timer      = 0;
 completed_purposes = 0;
 static_count       = 0;
 speech_cooldown    = 0;
+outreach_timer     = 0;
+outreach_level     = 0;
+outreach_active    = false;
+roaming_count      = 0;
 
 // Cell density: the cube is split into 16 x 16 x 16 blocks of 16^3 voxels.
 // set_voxel keeps a live count of cells per block, so crowding and loneliness are O(1).
@@ -182,11 +196,33 @@ voxel_index = function(_x, _y, _z) {
     return _z + (_x * world_size) + (_y * world_size * world_size);
 };
 
+// ---------------------------------------------------------------- wrapping
+// X and Y wrap round (leave the right side, come back in on the left; same front to back).
+// Z does not: the floor is the ground and the top is the sky.
+
+wrap = function(_v) {
+    return ((_v mod world_size) + world_size) mod world_size;
+};
+
+// Shortest signed step from _from to _to across the wrap, in -128..127.
+wrap_delta = function(_from, _to) {
+    var _half = world_size div 2;
+    var _d    = _to - _from;
+    return ((((_d + _half) mod world_size) + world_size) mod world_size) - _half;
+};
+
+wrap_dist = function(_ax, _ay, _az, _bx, _by, _bz) {
+    var _dx = wrap_delta(_ax, _bx);
+    var _dy = wrap_delta(_ay, _by);
+    var _dz = _bz - _az;
+    return sqrt((_dx * _dx) + (_dy * _dy) + (_dz * _dz));
+};
+
 get_voxel = function(_x, _y, _z) {
-    if (!in_bounds(_x, _y, _z)) {
+    if (_z < 0 || _z >= world_size) {
         return -1;
     }
-    return buffer_peek(voxels, voxel_index(_x, _y, _z), buffer_u8);
+    return buffer_peek(voxels, voxel_index(wrap(_x), wrap(_y), _z), buffer_u8);
 };
 
 // Grey for a 0..255 depth value. Empty space stays pure black, so matter starts at 24.
@@ -267,10 +303,10 @@ neighbour_count = function(_x, _y, _z) {
     for (var _dz = -1; _dz <= 1; _dz++) {
         for (var _dy = -1; _dy <= 1; _dy++) {
             for (var _dx = -1; _dx <= 1; _dx++) {
-                var _nx = _bx + _dx;
-                var _ny = _by + _dy;
+                var _nx = (_bx + _dx + bucket_dim) mod bucket_dim;
+                var _ny = (_by + _dy + bucket_dim) mod bucket_dim;
                 var _nz = _bz + _dz;
-                if (_nx >= 0 && _ny >= 0 && _nz >= 0 && _nx < bucket_dim && _ny < bucket_dim && _nz < bucket_dim) {
+                if (_nz >= 0 && _nz < bucket_dim) {
                     _total += cell_buckets[_nx + (_ny * bucket_dim) + (_nz * bucket_dim * bucket_dim)];
                 }
             }
@@ -280,9 +316,11 @@ neighbour_count = function(_x, _y, _z) {
 };
 
 set_voxel = function(_x, _y, _z, _value) {
-    if (!in_bounds(_x, _y, _z)) {
+    if (_z < 0 || _z >= world_size) {
         return false;
     }
+    _x = wrap(_x);
+    _y = wrap(_y);
     var _index = voxel_index(_x, _y, _z);
     var _old   = buffer_peek(voxels, _index, buffer_u8);
     if (_old == _value) {
@@ -453,6 +491,8 @@ make_default_genome = function() {
 };
 
 spawn_cell = function(_x, _y, _z, _genome, _energy, _carried, _generation) {
+    _x = wrap(_x);
+    _y = wrap(_y);
     if (instance_number(obj_cell) >= limits.max_cells) {
         return noone;
     }
@@ -471,6 +511,8 @@ spawn_cell = function(_x, _y, _z, _genome, _energy, _carried, _generation) {
 };
 
 spawn_lantern = function(_x, _y, _z, _owner_name) {
+    _x = wrap(_x);
+    _y = wrap(_y);
     if (instance_number(obj_lantern) >= limits.max_lanterns) {
         return noone;
     }
@@ -492,6 +534,8 @@ next_purpose_interval = function() {
 };
 
 spawn_purpose = function(_x, _y, _z, _kind_index) {
+    _x = wrap(_x);
+    _y = wrap(_y);
     if (instance_number(obj_purpose) >= limits.max_purposes) {
         return noone;
     }
@@ -524,7 +568,7 @@ drop_random_purpose = function() {
             if (get_voxel(_x, _y, _z) == voxel_empty) {
                 var _score = neighbour_count(_x, _y, _z);
                 with (obj_purpose) {
-                    if (point_distance_3d(px, py, pz, _x, _y, _z) < 48) {
+                    if (global.cellular_world.wrap_dist(px, py, pz, _x, _y, _z) < 48) {
                         _score += 8;
                     }
                 }
@@ -769,6 +813,10 @@ draw_marker = function(_vx, _vy, _vz, _is_lantern, _halo_radius, _rank) {
 
 // Faint line from a loyal follower to its leader.
 draw_link = function(_ax, _ay, _az, _bx, _by, _bz) {
+    // Skip links that cross the wrap seam rather than drawing them across the whole square.
+    if (abs(_ax - _bx) > world_size div 2 || abs(_ay - _by) > world_size div 2) {
+        return;
+    }
     var _a = project(_ax, _ay, _az);
     var _b = project(_bx, _by, _bz);
     var _h = display_scale * 0.5;

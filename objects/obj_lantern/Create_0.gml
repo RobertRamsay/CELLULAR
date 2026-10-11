@@ -54,7 +54,7 @@ share_energy = function() {
     var _radius = share_radius;
     var _amount = share_amount;
     with (obj_cell) {
-        if (point_distance_3d(cx, cy, cz, _lx, _ly, _lz) <= _radius) {
+        if (global.cellular_world.wrap_dist(cx, cy, cz, _lx, _ly, _lz) <= _radius) {
             energy = min(1, energy + _amount);
         }
     }

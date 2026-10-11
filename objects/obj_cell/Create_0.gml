@@ -46,6 +46,13 @@ follower_tally = 0;
 move_speed     = _world.limits.base_speed;
 senses         = _world.limits.perception_radius;
 
+// Outreach: proud cells roam to find purposeless ones; those they connect with get a short boost.
+roam_tx        = 0;
+roam_ty        = 0;
+roam_tz        = 0;
+roam_target    = noone;
+boost_timer    = 0;
+
 _world.set_voxel(cx, cy, cz, _world.voxel_cell);
 
 pick_heading = function() {
@@ -100,8 +107,8 @@ try_move = function(_dx, _dy, _dz) {
     }
     energy -= _world.limits.move_cost;
     _world.set_voxel(cx, cy, cz, _world.voxel_empty);
-    cx += _dx;
-    cy += _dy;
+    cx = _world.wrap(cx + _dx);
+    cy = _world.wrap(cy + _dy);
     cz += _dz;
     _world.set_voxel(cx, cy, cz, _world.voxel_cell);
     return true;
@@ -332,9 +339,10 @@ express = function() {
 // Head for a target. When blocked, mood decides how often the cell solves it
 // (climb over, tunnel through, or drop cargo) instead of fumbling sideways.
 step_toward = function(_tx, _ty, _tz) {
-    var _dx = sign(_tx - cx);
-    var _dy = sign(_ty - cy);
-    var _dz = sign(_tz - cz);
+    var _world = global.cellular_world;
+    var _dx    = sign(_world.wrap_delta(cx, _tx));
+    var _dy    = sign(_world.wrap_delta(cy, _ty));
+    var _dz    = sign(_tz - cz);
     if (_dx == 0 && _dy == 0 && _dz == 0) {
         return true;
     }
@@ -372,7 +380,7 @@ look_for_purpose = function() {
     var _z         = cz;
 
     with (obj_purpose) {
-        var _d = point_distance_3d(px, py, pz, _x, _y, _z);
+        var _d = global.cellular_world.wrap_dist(px, py, pz, _x, _y, _z);
         if (_d < _best_dist) {
             var _wanted = false;
             if (!discovered) {
@@ -426,7 +434,7 @@ recruit_nearby = function(_radius) {
     with (obj_cell) {
         if (_recruited < _needed) {
             if (role == "idle" && !instance_exists(leader)) {
-                if (point_distance_3d(cx, cy, cz, _x, _y, _z) <= _radius) {
+                if (global.cellular_world.wrap_dist(cx, cy, cz, _x, _y, _z) <= _radius) {
                     purpose_target = _p;
                     role           = "worker";
                     wait_timer     = 0;
@@ -445,24 +453,31 @@ recruit_nearby = function(_radius) {
 };
 
 // Average position of the idle swarm.
+// X and Y use a circular mean so a swarm straddling the wrap seam averages correctly.
 swarm_centre = function() {
+    var _world  = global.cellular_world;
     var _centre = { ok : false, vx : 0, vy : 0, vz : 0 };
-    var _sx     = 0;
-    var _sy     = 0;
+    var _k      = (2 * pi) / _world.world_size;
+    var _xc     = 0;
+    var _xs     = 0;
+    var _yc     = 0;
+    var _ys     = 0;
     var _sz     = 0;
     var _n      = 0;
     with (obj_cell) {
         if (role == "idle") {
-            _sx += cx;
-            _sy += cy;
+            _xc += cos(cx * _k);
+            _xs += sin(cx * _k);
+            _yc += cos(cy * _k);
+            _ys += sin(cy * _k);
             _sz += cz;
             _n  += 1;
         }
     }
     if (_n > 0) {
         _centre.ok = true;
-        _centre.vx = round(_sx / _n);
-        _centre.vy = round(_sy / _n);
+        _centre.vx = _world.wrap(round(arctan2(_xs, _xc) / _k));
+        _centre.vy = _world.wrap(round(arctan2(_ys, _yc) / _k));
         _centre.vz = round(_sz / _n);
     }
     return _centre;
@@ -482,7 +497,7 @@ purpose_turn = function() {
     }
 
     var _p    = purpose_target;
-    var _dist = point_distance_3d(cx, cy, cz, _p.px, _p.py, _p.pz);
+    var _dist = _world.wrap_dist(cx, cy, cz, _p.px, _p.py, _p.pz);
 
     if (role == "scout") {
         if (_dist <= _limits.work_radius + 1) {
@@ -583,7 +598,7 @@ find_lonely = function() {
     with (obj_cell) {
         if (id != _me && rank < _my_rank && purpose_target == noone) {
             if (!instance_exists(leader) && !instance_exists(sought_by)) {
-                var _d = point_distance_3d(cx, cy, cz, _x, _y, _z);
+                var _d = global.cellular_world.wrap_dist(cx, cy, cz, _x, _y, _z);
                 if (_d < _best_dist) {
                     if (count_followers() == 0) {
                         if (mood == "purposeless" || is_alone()) {
@@ -644,7 +659,7 @@ seek_turn = function() {
         return;
     }
 
-    if (point_distance_3d(cx, cy, cz, _t.cx, _t.cy, _t.cz) <= _limits.bond_radius) {
+    if (_world.wrap_dist(cx, cy, cz, _t.cx, _t.cy, _t.cz) <= _limits.bond_radius) {
         var _leader_name = entity_name;
         _t.leader    = id;
         _t.sought_by = noone;
@@ -679,9 +694,137 @@ follow_turn = function() {
     }
 
     role = "idle";
-    if (point_distance_3d(cx, cy, cz, _l.cx, _l.cy, _l.cz) > _limits.follow_distance) {
+    if (global.cellular_world.wrap_dist(cx, cy, cz, _l.cx, _l.cy, _l.cz) > _limits.follow_distance) {
         step_toward(_l.cx, _l.cy, _l.cz);
     } else {
         take_turn();
     }
+};
+
+// ---------------------------------------------------------------- outreach
+
+// Proud cells roam while the swarm's purposelessness is high. Loyal followers stay with their leader.
+should_roam = function() {
+    if (mood != "proud") {
+        return false;
+    }
+    if (instance_exists(leader)) {
+        return false;
+    }
+    return global.cellular_world.outreach_active;
+};
+
+// Pick a distance and a direction and head that way.
+pick_roam_leg = function() {
+    var _world  = global.cellular_world;
+    var _limits = _world.limits;
+    var _dist   = irandom_range(_limits.roam_min, _limits.roam_max);
+    var _dir    = random(360);
+    roam_tx = _world.wrap(cx + round(lengthdir_x(_dist, _dir)));
+    roam_ty = _world.wrap(cy + round(lengthdir_y(_dist, _dir)));
+    roam_tz = cz;
+};
+
+start_roaming = function() {
+    purpose_target = noone;
+    release_seek();
+    role        = "roaming";
+    roam_target = noone;
+    pick_roam_leg();
+    say("going to find the lost ones");
+};
+
+stop_roaming = function() {
+    role        = "idle";
+    roam_target = noone;
+};
+
+// Nearest purposeless cell without a purpose, within senses.
+find_purposeless = function() {
+    var _me        = id;
+    var _x         = cx;
+    var _y         = cy;
+    var _z         = cz;
+    var _best      = noone;
+    var _best_dist = senses + 1;
+    with (obj_cell) {
+        if (id != _me && mood == "purposeless" && purpose_target == noone) {
+            var _d = global.cellular_world.wrap_dist(cx, cy, cz, _x, _y, _z);
+            if (_d < _best_dist) {
+                _best      = id;
+                _best_dist = _d;
+            }
+        }
+    }
+    return _best;
+};
+
+// Temporary lift for a cell that has been reached: +1 speed, +10 senses for 10 seconds.
+apply_boost = function() {
+    var _limits = global.cellular_world.limits;
+    if (boost_timer <= 0) {
+        move_speed += _limits.connect_speed_boost;
+        senses     += _limits.connect_sense_boost;
+    }
+    boost_timer = _limits.connect_boost_steps;
+};
+
+end_boost = function() {
+    var _limits = global.cellular_world.limits;
+    move_speed -= _limits.connect_speed_boost;
+    senses     -= _limits.connect_sense_boost;
+    boost_timer = 0;
+};
+
+// The roamer's pride goes up; the other's purposelessness is halved and it gets the boost.
+connect_with = function(_t) {
+    var _world  = global.cellular_world;
+    var _limits = _world.limits;
+    var _name   = entity_name;
+
+    usage = min(1, usage + _limits.connect_pride);
+
+    with (_t) {
+        usage = 1 - ((1 - usage) * 0.5);
+        apply_boost();
+        say("thank you, " + _name + "!");
+    }
+
+    say("you're not alone, " + _t.entity_name);
+    _world.log_action(id, "outreach", "connected", _t.entity_name + " lifted");
+    roam_target = noone;
+};
+
+roam_turn = function() {
+    var _world  = global.cellular_world;
+    var _limits = _world.limits;
+
+    if (role != "roaming") {
+        start_roaming();
+    }
+
+    if (instance_exists(roam_target)) {
+        if (roam_target.mood != "purposeless" || roam_target.purpose_target != noone) {
+            roam_target = noone;
+        }
+    }
+
+    if (!instance_exists(roam_target)) {
+        roam_target = find_purposeless();
+    }
+
+    if (instance_exists(roam_target)) {
+        var _t = roam_target;
+        if (_world.wrap_dist(cx, cy, cz, _t.cx, _t.cy, _t.cz) <= _limits.bond_radius) {
+            connect_with(_t);
+        } else {
+            step_toward(_t.cx, _t.cy, _t.cz);
+        }
+        return;
+    }
+
+    if (_world.wrap_dist(cx, cy, cz, roam_tx, roam_ty, roam_tz) <= 3) {
+        pick_roam_leg();
+    }
+    step_toward(roam_tx, roam_ty, roam_tz);
 };

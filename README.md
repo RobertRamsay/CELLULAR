@@ -10,6 +10,10 @@ A GameMaker project. A living pixel inside a 256 x 256 x 256 voxel room.
   - **Side**: looking along X, grey = how near the pixel is.
 - Black is empty space. Matter starts at a dark grey, so a pixel on the floor is still visible.
 
+## Wrapping
+- X and Y wrap round: a cell leaving the right side comes back in on the left, and the same front to back. Distances, directions, crowding and the herald's swarm centre all measure across the seam.
+- Z does not wrap: the floor is the ground and the top is the sky.
+
 ## Cells (living pixels)
 - Move freely through empty voxels in any of 26 directions. When not touching matter they drift down.
 - **Dig** a static pixel and carry it, or **place** a carried pixel. A cell can only place what it has dug, so cells never create matter.
@@ -76,6 +80,16 @@ A GameMaker project. A living pixel inside a 256 x 256 x 256 voxel room.
 - 1920 x 1080 room in a resizable window; F11 toggles fullscreen. The cube is shown at 4x in the middle.
 - Left panel: world stats, moods, ranks, forces, active purposes and controls.
 - Right panel: recent messages, newest first, with the name of the entity behind each one.
+
+## Outreach
+- Twice a second the world measures **purposelessness**: the share of cells whose mood is purposeless.
+- At 25% or more, outreach is on. Every **proud** cell that isn't a loyal follower leaves whatever it was doing and **roams**: it picks a direction and a distance (40 to 120 voxels), heads that way, and picks a new leg when it gets there.
+- While roaming it looks for the nearest purposeless cell within its senses and goes to it. When they connect:
+  - the roamer's pride goes up (+0.15 to its sense of being used);
+  - the other cell's purposelessness is halved;
+  - the other cell gets **+1 speed and +10 senses for 10 seconds**.
+- A proud leader's loyal followers come with it as it roams.
+- Roaming stops when outreach turns off or the cell is no longer proud.
 
 ## Limits
 1024 cells, 24 lanterns, 32 purposes. Each cell gets as many actions per tick as its speed. Crowding and loneliness use live per-block cell counts (16 x 16 x 16 blocks), so they stay cheap at 1024 cells. Mood expressions share a global speech budget (about four a second) so the screen and message log stay readable. Clone choices and lantern refusals are not logged. P pauses everything instantly; K wipes all life.

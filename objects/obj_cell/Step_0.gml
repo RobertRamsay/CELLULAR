@@ -7,6 +7,13 @@ if (global.cellular_paused) {
 var _limits = global.cellular_world.limits;
 
 energy = min(1, energy + _limits.energy_regen);
+
+if (boost_timer > 0) {
+    boost_timer -= 1;
+    if (boost_timer <= 0) {
+        end_boost();
+    }
+}
 tick_timer     += 1;
 decision_timer += 1;
 
@@ -17,6 +24,15 @@ if (tick_timer >= _limits.tick_steps) {
 
     // move_speed turns per tick; the gatekeeper allows move_speed actions per tick.
     repeat (move_speed) {
+        // Proud cells wander off to find the purposeless while purposelessness is high.
+        if (should_roam()) {
+            roam_turn();
+            continue;
+        }
+        if (role == "roaming") {
+            stop_roaming();
+        }
+
         // Loyal followers never freelance; everyone else notices purposes nearby.
         if (purpose_target == noone && !instance_exists(leader)) {
             look_for_purpose();

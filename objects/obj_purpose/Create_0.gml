@@ -41,7 +41,7 @@ refresh_counts = function() {
             if (role != "idle") {
                 _assigned += 1;
             }
-            if (point_distance_3d(cx, cy, cz, _x, _y, _z) <= _radius) {
+            if (global.cellular_world.wrap_dist(cx, cy, cz, _x, _y, _z) <= _radius) {
                 _present += 1;
             }
         }

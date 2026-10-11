@@ -29,6 +29,29 @@ if (!global.cellular_paused) {
     if (speech_cooldown > 0) {
         speech_cooldown -= 1;
     }
+
+    // How purposeless is the swarm? Above the threshold, proud cells go out roaming.
+    outreach_timer -= 1;
+    if (outreach_timer <= 0) {
+        outreach_timer = limits.outreach_check_steps;
+        var _lost  = 0;
+        var _roam  = 0;
+        var _total = instance_number(obj_cell);
+        with (obj_cell) {
+            if (mood == "purposeless") {
+                _lost += 1;
+            }
+            if (role == "roaming") {
+                _roam += 1;
+            }
+        }
+        outreach_level = 0;
+        if (_total > 0) {
+            outreach_level = _lost / _total;
+        }
+        outreach_active = (outreach_level >= limits.outreach_threshold);
+        roaming_count   = _roam;
+    }
     purpose_timer -= 1;
     if (purpose_timer <= 0) {
         drop_random_purpose();

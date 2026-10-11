@@ -107,6 +107,12 @@ draw_text(_x, _y, "purposes        " + string(instance_number(obj_purpose)) + " 
 _y += _row;
 draw_text(_x, _y, "generations     " + string(_max_gen));
 _y += _row;
+var _outreach = "off";
+if (outreach_active) {
+    _outreach = "ON";
+}
+draw_text(_x, _y, "purposelessness " + string(floor(outreach_level * 100)) + "%   outreach " + _outreach + "   roaming " + string(roaming_count));
+_y += _row;
 draw_text(_x, _y, "clones " + string(action_counts.clone) + "   lantern choices " + string(action_counts.become_lantern) + "   work " + string(action_counts.work));
 _y += _row * 2;
 
