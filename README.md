@@ -50,9 +50,31 @@ A GameMaker project. A living pixel inside a 256 x 256 x 256 voxel room.
 | purposeless | 0.6 |
 | content | 0.9 |
 | purposeful | 1.15 |
+| loyal | 1.0 |
 | proud | 1.3 |
 
 - Every 8 to 20 seconds each cell says how it feels in a speech bubble, and it's logged.
+
+## Ranks and loyalty
+- Every cell has a name. Each completed purpose counts towards its rank:
+
+| Rank | Purposes completed | Followers it may lead |
+|---|---|---|
+| Novice | 0 | 0 |
+| Helper | 1 | 0 |
+| Veteran | 3 | 2 |
+| Captain | 6 | 3 |
+| Elder | 10 | 6 |
+
+- From Veteran up, an idle cell with room in its force goes looking for a **lonely** cell: one with no leader and no purpose, of lower rank, that is purposeless or has nobody within 10 voxels.
+- When it reaches it, the lonely cell joins its force and becomes **loyal**. Loyal followers stay near their leader, never answer anyone else's call, and take up whatever purpose their leader takes up.
+- Loyal is its own mood (multiplier 1.0). If a leader is lost, its followers are free again.
+- Rank shows as small pips above a cell; a faint line links each follower to its leader.
+
+## Screen
+- 1920 x 1080 room in a resizable window; F11 toggles fullscreen. The cube is shown at 4x in the middle.
+- Left panel: world stats, moods, ranks, forces, active purposes and controls.
+- Right panel: recent messages, newest first, with the name of the entity behind each one.
 
 ## Limits
 64 cells, 24 lanterns, one action per cell per tick. P pauses everything instantly; K wipes all life.
@@ -62,6 +84,7 @@ A GameMaker project. A living pixel inside a 256 x 256 x 256 voxel room.
 |---|---|
 | Space | Seed a cell at the surface under the mouse |
 | O | Drop a purpose at the surface under the mouse |
+| F11 | Toggle fullscreen |
 | Left mouse | Add static pixels to the surface under the mouse |
 | Right mouse | Remove static pixels from the surface under the mouse |
 | Mouse wheel | Brush size |
@@ -76,4 +99,4 @@ A GameMaker project. A living pixel inside a 256 x 256 x 256 voxel room.
 - `obj_cell`: the living pixel, its genome and life choice.
 - `obj_lantern`: the special pixel.
 - `obj_purpose`: a purpose to be found, shared and worked on.
-- `rm_cellular`: 768 x 872 room (256 x 256 world at 3x, plus a status bar).
+- `rm_cellular`: 1920 x 1080 room (256 x 256 world at 4x, side panels).

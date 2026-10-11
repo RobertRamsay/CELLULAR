@@ -14,13 +14,25 @@ if (tick_timer >= _limits.tick_steps) {
     tick_timer        = 0;
     actions_this_tick = 0;
     update_mood();
-    if (role == "idle") {
+
+    // Loyal followers never freelance; everyone else notices purposes nearby.
+    if (purpose_target == noone && !instance_exists(leader)) {
         look_for_purpose();
     }
-    if (role == "idle") {
-        take_turn();
-    } else {
+
+    if (purpose_target != noone) {
         purpose_turn();
+    } else if (instance_exists(leader)) {
+        follow_turn();
+    } else if (role == "seeking") {
+        seek_turn();
+    } else {
+        consider_seeking();
+        if (role == "seeking") {
+            seek_turn();
+        } else {
+            take_turn();
+        }
     }
 }
 

@@ -5,6 +5,8 @@
 
 var _world = global.cellular_world;
 
+entity_name = "Lantern of " + spawn_owner;
+
 lx = spawn_x;
 ly = spawn_y;
 lz = spawn_z;

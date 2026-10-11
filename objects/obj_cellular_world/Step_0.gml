@@ -40,10 +40,14 @@ if (mouse_wheel_down()) {
     brush_radius = max(brush_min, brush_radius - 1);
 }
 
-var _px = floor(mouse_x / display_scale);
-var _py = floor(mouse_y / display_scale);
+if (keyboard_check_pressed(vk_f11)) {
+    window_set_fullscreen(!window_get_fullscreen());
+}
 
-if (_px >= 0 && _py >= 0 && _px < world_size && _py < world_size) {
+var _px = mouse_cell_x();
+var _py = mouse_cell_y();
+
+if (_px >= 0 && _py >= 0) {
     if (keyboard_check_pressed(vk_space)) {
         var _slot = surface_slot(view_mode, _px, _py);
         if (_slot.ok) {

@@ -7,8 +7,19 @@ global.cellular_world  = id;
 depth         = 50;
 world_size    = 256;
 world_volume  = world_size * world_size * world_size;
-display_scale = 3;
-ui_top        = world_size * display_scale;
+display_scale = 4;
+
+// Screen layout (room is 1920 x 1080; the window scales it)
+screen_w      = 1920;
+screen_h      = 1080;
+world_left    = (screen_w - (world_size * display_scale)) div 2;
+world_top     = 40;
+panel_margin  = 16;
+left_panel_x  = panel_margin;
+left_panel_w  = world_left - (panel_margin * 2);
+right_panel_x = world_left + (world_size * display_scale) + panel_margin;
+right_panel_w = screen_w - right_panel_x - panel_margin;
+start_time    = current_time;
 brush_radius  = 3;
 brush_min     = 1;
 brush_max     = 12;
@@ -82,6 +93,15 @@ limits = {
     express_max_steps    : game_get_speed(gamespeed_fps) * 20,
     bubble_steps         : game_get_speed(gamespeed_fps) * 3,
 
+    // Ranks and loyalty
+    leader_rank          : 2,
+    seek_chance          : 0.05,
+    seek_radius          : 96,
+    seek_ticks           : 150,
+    bond_radius          : 2,
+    follow_distance      : 4,
+    lonely_radius        : 10,
+
     allowed              : ["move", "dig", "place", "clone", "become_lantern", "work"]
 };
 
@@ -98,6 +118,7 @@ mood_factors = {
     purposeless : 0.6,
     content     : 0.9,
     purposeful  : 1.15,
+    loyal       : 1.0,
     proud       : 1.3
 };
 
@@ -105,11 +126,22 @@ mood_lines = {
     purposeless : ["purposeless...", "what am I for?", "drifting", "nothing to do"],
     content     : ["all is fine", "just digging", "hmm"],
     purposeful  : ["I have a purpose!", "on my way!", "this matters"],
+    loyal       : ["I belong now", "not lonely any more", "where you go, I go"],
     proud       : ["proud - I'm needed", "we keep going", "useful again"]
 };
 
 purpose_timer      = 0;
 completed_purposes = 0;
+static_count       = 0;
+
+// Ranks earned by completing purposes. From leader_rank up, a cell seeks lonely cells to join its force.
+rank_names      = ["Novice", "Helper", "Veteran", "Captain", "Elder"];
+rank_thresholds = [0, 1, 3, 6, 10];
+rank_followers  = [0, 0, 2, 3, 6];
+
+name_starts   = ["Ka", "Lo", "Mi", "Zu", "Te", "Ra", "No", "Vi", "Sa", "Bo", "Qi", "Fen", "Ul", "Dro", "Pim", "Ash"];
+name_ends     = ["ro", "na", "lix", "bo", "ki", "ma", "tor", "el", "uz", "pa", "ni", "sk", "an", "it", "um", "ey"];
+names_issued  = 0;
 
 action_counts = {
     move           : 0,
@@ -218,6 +250,12 @@ set_voxel = function(_x, _y, _z, _value) {
     buffer_poke(voxels, _index, buffer_u8, _value);
 
     if (_value == voxel_static) {
+        static_count += 1;
+    } else if (_old == voxel_static) {
+        static_count -= 1;
+    }
+
+    if (_value == voxel_static) {
         if (_z > top_cache[# _x, _y]) {
             top_cache[# _x, _y] = _z;
             write_view_pixel(0, _x, _y, shade_for(_z));
@@ -294,6 +332,7 @@ clear_world_data = function() {
     ds_grid_clear(top_cache, -1);
     ds_grid_clear(front_cache, world_size);
     ds_grid_clear(side_cache, world_size);
+    static_count = 0;
 };
 
 clear_world = function() {
@@ -315,6 +354,7 @@ generate_terrain = function() {
             _h = clamp(_h, 0, world_size - 1);
             buffer_fill(voxels, voxel_index(_x, _y, 0), buffer_u8, voxel_static, _h + 1);
             top_cache[# _x, _y] = _h;
+            static_count += _h + 1;
         }
     }
 
@@ -382,7 +422,7 @@ spawn_cell = function(_x, _y, _z, _genome, _energy, _carried, _generation) {
     });
 };
 
-spawn_lantern = function(_x, _y, _z) {
+spawn_lantern = function(_x, _y, _z, _owner_name) {
     if (instance_number(obj_lantern) >= limits.max_lanterns) {
         return noone;
     }
@@ -390,9 +430,10 @@ spawn_lantern = function(_x, _y, _z) {
         return noone;
     }
     return instance_create_depth(0, 0, 10, obj_lantern, {
-        spawn_x : _x,
-        spawn_y : _y,
-        spawn_z : _z
+        spawn_x     : _x,
+        spawn_y     : _y,
+        spawn_z     : _z,
+        spawn_owner : _owner_name
     });
 };
 
@@ -434,8 +475,33 @@ drop_random_purpose = function() {
     return noone;
 };
 
+make_cell_name = function() {
+    names_issued += 1;
+    var _start = name_starts[irandom(array_length(name_starts) - 1)];
+    var _end   = name_ends[irandom(array_length(name_ends) - 1)];
+    return _start + _end + "-" + string(names_issued);
+};
+
+rank_for = function(_completions) {
+    var _rank = 0;
+    for (var i = 0; i < array_length(rank_thresholds); i++) {
+        if (_completions >= rank_thresholds[i]) {
+            _rank = i;
+        }
+    }
+    return _rank;
+};
+
+// _who is "world" (a string) or a cell, lantern or purpose instance; all of those define entity_name.
 log_action = function(_who, _action, _result, _reason) {
-    array_push(action_log, { who : string(_who), action : _action, result : _result, reason : _reason });
+    var _name = "?";
+    if (is_string(_who)) {
+        _name = _who;
+    } else if (instance_exists(_who)) {
+        _name = _who.entity_name;
+    }
+    var _seconds = (current_time - start_time) div 1000;
+    array_push(action_log, { who : _name, action : _action, result : _result, reason : _reason, time : _seconds });
     if (array_length(action_log) > log_max) {
         array_delete(action_log, 0, 1);
     }
@@ -570,30 +636,35 @@ sculpt_at = function(_view, _px, _py, _add) {
 
 // ---------------------------------------------------------------- drawing living pixels
 
-// Voxel to screen for the current view. value is the depth used for the grey.
+// Voxel to screen for the current view. px/py is the top-left pixel of the voxel on screen;
+// value is the depth used for the grey.
 project = function(_vx, _vy, _vz) {
-    var _p = { sx : 0, sy : 0, value : 0 };
+    var _p = { px : 0, py : 0, value : 0 };
+    var _sx = 0;
+    var _sy = 0;
     if (view_mode == 0) {
-        _p.sx    = _vx;
-        _p.sy    = _vy;
+        _sx      = _vx;
+        _sy      = _vy;
         _p.value = _vz;
     } else if (view_mode == 1) {
-        _p.sx    = _vx;
-        _p.sy    = world_size - 1 - _vz;
+        _sx      = _vx;
+        _sy      = world_size - 1 - _vz;
         _p.value = world_size - 1 - _vy;
     } else {
-        _p.sx    = _vy;
-        _p.sy    = world_size - 1 - _vz;
+        _sx      = _vy;
+        _sy      = world_size - 1 - _vz;
         _p.value = world_size - 1 - _vx;
     }
+    _p.px = world_left + (_sx * display_scale);
+    _p.py = world_top + (_sy * display_scale);
     return _p;
 };
 
-draw_marker = function(_vx, _vy, _vz, _is_lantern, _halo_radius) {
+draw_marker = function(_vx, _vy, _vz, _is_lantern, _halo_radius, _rank) {
     var _p     = project(_vx, _vy, _vz);
     var _s     = display_scale;
-    var _left  = _p.sx * _s;
-    var _top   = _p.sy * _s;
+    var _left  = _p.px;
+    var _top   = _p.py;
     var _shade = shade_for(_p.value);
 
     if (_is_lantern) {
@@ -618,15 +689,32 @@ draw_marker = function(_vx, _vy, _vz, _is_lantern, _halo_radius) {
         draw_rectangle(_left - 3, _top - 3, _left + _s + 2, _top + _s + 2, true);
     }
 
+    // Rank pips above the pixel
+    for (var i = 0; i < _rank; i++) {
+        draw_set_colour(c_white);
+        draw_rectangle(_left + (i * 3), _top - 4, _left + (i * 3) + 1, _top - 3, false);
+    }
+
     draw_set_colour(c_white);
+};
+
+// Faint line from a loyal follower to its leader.
+draw_link = function(_ax, _ay, _az, _bx, _by, _bz) {
+    var _a = project(_ax, _ay, _az);
+    var _b = project(_bx, _by, _bz);
+    var _h = display_scale * 0.5;
+    draw_set_colour(c_white);
+    draw_set_alpha(0.25);
+    draw_line(_a.px + _h, _a.py + _h, _b.px + _h, _b.py + _h);
+    draw_set_alpha(1);
 };
 
 // A small speech bubble above a living pixel.
 draw_bubble = function(_vx, _vy, _vz, _text) {
     var _p  = project(_vx, _vy, _vz);
     var _s  = display_scale;
-    var _cx = (_p.sx * _s) + (_s * 0.5);
-    var _by = (_p.sy * _s) - 6;
+    var _cx = _p.px + (_s * 0.5);
+    var _by = _p.py - 8;
     var _w  = string_width(_text) + 8;
     var _h  = string_height(_text) + 4;
 
@@ -646,9 +734,9 @@ draw_bubble = function(_vx, _vy, _vz, _text) {
 draw_purpose = function(_vx, _vy, _vz, _label, _progress, _discovered) {
     var _p     = project(_vx, _vy, _vz);
     var _s     = display_scale;
-    var _cx    = (_p.sx * _s) + (_s * 0.5);
-    var _cy    = (_p.sy * _s) + (_s * 0.5);
-    var _pulse = 6 + (2 * sin(current_time / 200));
+    var _cx    = _p.px + (_s * 0.5);
+    var _cy    = _p.py + (_s * 0.5);
+    var _pulse = 8 + (3 * sin(current_time / 200));
 
     draw_set_colour(c_white);
     draw_primitive_begin(pr_linestrip);
@@ -665,9 +753,9 @@ draw_purpose = function(_vx, _vy, _vz, _label, _progress, _discovered) {
 
     // Progress bar
     draw_set_colour(c_dkgray);
-    draw_rectangle(_cx - 12, _cy + 10, _cx + 12, _cy + 12, false);
+    draw_rectangle(_cx - 16, _cy + 13, _cx + 16, _cy + 15, false);
     draw_set_colour(c_white);
-    draw_rectangle(_cx - 12, _cy + 10, _cx - 12 + (24 * _progress), _cy + 12, false);
+    draw_rectangle(_cx - 16, _cy + 13, _cx - 16 + (32 * _progress), _cy + 15, false);
 
     var _text = "?";
     if (_discovered) {
@@ -675,10 +763,38 @@ draw_purpose = function(_vx, _vy, _vz, _label, _progress, _discovered) {
     }
     draw_set_halign(fa_center);
     draw_set_valign(fa_top);
-    draw_text(_cx, _cy + 14, _text);
+    draw_text(_cx, _cy + 18, _text);
     draw_set_halign(fa_left);
+};
+
+format_time = function(_seconds) {
+    var _m = _seconds div 60;
+    var _s = _seconds mod 60;
+    var _pad = "";
+    if (_s < 10) {
+        _pad = "0";
+    }
+    return string(_m) + ":" + _pad + string(_s);
+};
+
+// Mouse position to a voxel column/row on screen, or -1 when outside the square.
+mouse_cell_x = function() {
+    var _mx = floor((mouse_x - world_left) / display_scale);
+    if (_mx < 0 || _mx >= world_size) {
+        return -1;
+    }
+    return _mx;
+};
+
+mouse_cell_y = function() {
+    var _my = floor((mouse_y - world_top) / display_scale);
+    if (_my < 0 || _my >= world_size) {
+        return -1;
+    }
+    return _my;
 };
 
 purpose_timer = next_purpose_interval();
 
+window_center();
 generate_terrain();

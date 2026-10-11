@@ -11,6 +11,7 @@ pz = spawn_z;
 
 kind         = _world.purpose_kinds[spawn_kind];
 label        = kind.name;
+entity_name  = kind.name;
 work_needed  = kind.work;
 min_helpers  = kind.min_helpers;
 want_helpers = kind.want_helpers;
@@ -79,9 +80,17 @@ complete = function() {
         var _cell = contributors[i];
         if (instance_exists(_cell)) {
             with (_cell) {
-                energy = min(1, energy + _energy);
-                usage  = min(1, usage + _pride);
-                say("we did it!");
+                energy      = min(1, energy + _energy);
+                usage       = min(1, usage + _pride);
+                completions += 1;
+                var _new_rank = _world.rank_for(completions);
+                if (_new_rank > rank) {
+                    rank = _new_rank;
+                    say("ranked up: " + _world.rank_names[rank] + "!");
+                    _world.log_action(id, "rank", "up", _world.rank_names[rank]);
+                } else {
+                    say("we did it!");
+                }
             }
             _shared += 1;
         }
